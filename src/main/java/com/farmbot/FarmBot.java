@@ -73,7 +73,8 @@ public class FarmBot {
     // corrida "de verdade" (teclas) no farm
     private static boolean keysHeld;        // estamos segurando W/pulo
     private static boolean breakingSlow;    // quebrando algo que demora (melancia etc.): para de andar
-    private static int closeTicks, forwardTicks;
+    private static int forwardTicks, headingTicks, rightClickCooldown, lastTurnSign = 1;
+    private static float heading;       // rumo de corrida (yaw) atual
 
     public static int targetCount() {
         return FarmConfig.task == FarmConfig.Task.FARM ? ready.size() : Math.max(mineCount, 0);
@@ -102,7 +103,8 @@ public class FarmBot {
         cmdVel = Vec3d.ZERO;
         idleTicks = 0;
         scanTimer = 0; cooldown = 0; statusTimer = 0; warnedFly = false; warnedHunger = false;
-        closeTicks = 0; forwardTicks = 0; breakingSlow = false;
+        forwardTicks = 0; breakingSlow = false; headingTicks = 0; rightClickCooldown = 0;
+        heading = mc.player.getYaw();
         HumanLook.reset();
         FarmConfig.enabled = true;
         msg(mc, mining ? "§aMineração LIGADA" : "§aFarm LIGADO");
@@ -165,13 +167,13 @@ public class FarmBot {
             if (wantsFly(mc, p)) {
                 releaseKeys(mc);
                 move(mc, p, false);                // voando: movimento por velocidade
+                setFarmAim(p);
+                updateLook(p);
             } else {
                 cmdVel = Vec3d.ZERO;
-                runFarm(mc, p, holdForBreak);      // corrida de verdade (W + sprint)
+                runFarm(mc, p, holdForBreak);      // corrida de verdade (W + sprint) + câmera
             }
-            setFarmAim(p);             // mira (suave) na planta alvo
-            updateLook(p);             // gira a câmera
-            if (cooldown > 0) cooldown--; else farmAct(mc, p); // só age no que está sob a mira
+            farmAct(mc, p);                        // quebra o que estiver sob a mira, TODO tick
         }
     }
 
@@ -251,7 +253,6 @@ public class FarmBot {
             mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, bhr);
             p.swingHand(Hand.MAIN_HAND);
             replantQueue.remove(above);
-            cooldown = 2 + RNG.nextInt(3);
             return;
         }
 
@@ -269,10 +270,11 @@ public class FarmBot {
         }
 
         if (crop.usesRightClick()) {
+            if (rightClickCooldown > 0) { rightClickCooldown--; return; } // evita spam enquanto o servidor responde
             mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, bhr);
             p.swingHand(Hand.MAIN_HAND);
             ready.remove(pos);
-            cooldown = 3 + RNG.nextInt(3);
+            rightClickCooldown = 4;
             return;
         }
 
@@ -285,7 +287,6 @@ public class FarmBot {
                 if (replantQueue.size() > 2000) replantQueue.clear();
                 replantQueue.put(pos, crop);
             }
-            cooldown = 1 + RNG.nextInt(3); // ritmo humano entre uma quebra e outra
         } else if (!p.getAbilities().creativeMode && bs.getHardness(mc.world, pos) > 0) {
             breakingSlow = true; // ainda quebrando (melancia, abóbora...): para de andar até terminar
         }
@@ -518,10 +519,6 @@ public class FarmBot {
         }
     }
 
-    // ==================================================================
-    //        CORRIDA HUMANIZADA (farm andando): W + sprint de verdade
-    // ==================================================================
-
     /** Voar só se o jogador escolheu voar E pode voar (criativo). */
     private static boolean wantsFly(MinecraftClient mc, ClientPlayerEntity p) {
         if (FarmConfig.mode != FarmConfig.Mode.FLY) return false;
@@ -542,63 +539,154 @@ public class FarmBot {
         if (mc.player != null && mc.player.isSprinting()) mc.player.setSprinting(false);
     }
 
+    // ==================================================================
+    //   CORRIDA HUMANIZADA (farm correndo): rumo aleatório + mira varrendo
+    // ==================================================================
+    // O bot NÃO persegue plantas (isso faz o personagem orbitar a planta, já que a câmera gira
+    // devagar e a corrida é rápida). Ele escolhe um RUMO e corre reto nele por 3–5 s; depois faz
+    // uma virada leve (ou para o lado) e segue em outro rumo, sempre dentro da área. A mira varre o
+    // chão à frente e quebra/replanta o que estiver sob ela, a cada tick, sem delay.
+
+    private static final double EDGE_MARGIN = 0.5;
+
+    private static boolean insideArea(double x, double z, double margin) {
+        double sx = FarmConfig.maxX() + 1 - FarmConfig.minX();
+        double sz = FarmConfig.maxZ() + 1 - FarmConfig.minZ();
+        double mx = Math.min(margin, sx / 3.0), mz = Math.min(margin, sz / 3.0);
+        return x >= FarmConfig.minX() + mx && x <= FarmConfig.maxX() + 1 - mx
+                && z >= FarmConfig.minZ() + mz && z <= FarmConfig.maxZ() + 1 - mz;
+    }
+
+    /** Quanto dá para correr neste rumo antes de sair da área (0 se já está fora). */
+    private static double freeDist(double x, double z, float yaw, double margin) {
+        double sx = FarmConfig.maxX() + 1 - FarmConfig.minX();
+        double sz = FarmConfig.maxZ() + 1 - FarmConfig.minZ();
+        double mx = Math.min(margin, sx / 3.0), mz = Math.min(margin, sz / 3.0);
+        double loX = FarmConfig.minX() + mx, hiX = FarmConfig.maxX() + 1 - mx;
+        double loZ = FarmConfig.minZ() + mz, hiZ = FarmConfig.maxZ() + 1 - mz;
+        if (x < loX || x > hiX || z < loZ || z > hiZ) return 0;
+        double fx = dirX(yaw), fz = dirZ(yaw);
+        double t = 1.0e9;
+        if (fx > 1e-6) t = Math.min(t, (hiX - x) / fx);
+        else if (fx < -1e-6) t = Math.min(t, (loX - x) / fx);
+        if (fz > 1e-6) t = Math.min(t, (hiZ - z) / fz);
+        else if (fz < -1e-6) t = Math.min(t, (loZ - z) / fz);
+        return t;
+    }
+
+    private static double areaMinSide() {
+        return Math.min(FarmConfig.maxX() + 1 - FarmConfig.minX(), FarmConfig.maxZ() + 1 - FarmConfig.minZ());
+    }
+
+    /** Distância da borda em que o bot decide mudar de rumo. */
+    private static double wallTrigger() { return MathHelper.clamp(0.25 * areaMinSide(), 1.5, 4.0); }
+
+    /** Distância livre desejada ao escolher um rumo novo (atravessar a área, não ficar rente à borda). */
+    private static double wantRun() { return Math.min(12.0, 0.55 * areaMinSide()); }
+
+    private static double dirX(float yaw) { return -Math.sin(Math.toRadians(yaw)); }
+    private static double dirZ(float yaw) { return Math.cos(Math.toRadians(yaw)); }
+
+    /** Quantas plantas/replantes existem num corredor à frente deste rumo (prefere rumos com plantas). */
+    private static int cropsAlong(double px, double pz, float yaw) {
+        double fx = dirX(yaw), fz = dirZ(yaw);
+        int n = 0;
+        for (BlockPos b : ready) n += corridor(b, px, pz, fx, fz);
+        for (BlockPos b : replantQueue.keySet()) n += corridor(b, px, pz, fx, fz);
+        return Math.min(n, 15);
+    }
+
+    private static int corridor(BlockPos b, double px, double pz, double fx, double fz) {
+        double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
+        double f = dx * fx + dz * fz;                 // distância à frente
+        if (f < 1.0 || f > 9.0) return 0;
+        double l = Math.abs(-dx * fz + dz * fx);      // desvio lateral
+        return l <= 2.0 ? 1 : 0;
+    }
+
     /**
-     * Corre de verdade (tecla de andar + sprint) em direção ao próximo alvo, sem parar entre
-     * uma planta e outra. A direção é controlada só pela câmera (que gira devagar), então o
-     * caminho faz curvas suaves, como um jogador segurando W e movendo o mouse.
+     * Escolhe um novo rumo.
+     * mode 0 = troca normal: virada leve (15–55°) ou para o lado (60–100°), alternando o lado para não dar círculo
+     * mode 1 = chegando na borda: escolhe um rumo que atravessa a área (diagonal longa)
+     * mode 2 = travou em algo: vira bastante (90–180°)
      */
+    private static void newHeading(ClientPlayerEntity p, int mode) {
+        double px = p.getX(), pz = p.getZ();
+        double trig = wallTrigger(), want = wantRun();
+        float cur = heading;
+        float best = cur;
+        double bestScore = -1.0e9;
+        int tries = mode == 0 ? 8 : 18;
+
+        for (int i = 0; i < tries; i++) {
+            float turn;
+            if (mode == 0) {
+                float mag = RNG.nextInt(100) < 70 ? 15f + RNG.nextFloat() * 40f : 60f + RNG.nextFloat() * 40f;
+                int sign = RNG.nextInt(100) < 65 ? -lastTurnSign : lastTurnSign;
+                turn = mag * sign;
+            } else if (mode == 2) {
+                turn = (90f + RNG.nextFloat() * 90f) * (RNG.nextBoolean() ? 1 : -1);
+            } else {
+                turn = (RNG.nextFloat() * 2f - 1f) * 180f;
+            }
+            float yaw = MathHelper.wrapDegrees(cur + turn);
+            double free = freeDist(px, pz, yaw, EDGE_MARGIN);
+
+            double score = cropsAlong(px, pz, yaw) * 0.4 + RNG.nextDouble() * 2.5
+                    - Math.abs(turn) / (mode == 0 ? 60.0 : 50.0);
+            if (free < want) score -= (want - free) * 2.5;
+            if (free < trig + 1.0) score -= 1000;
+            if (score > bestScore) { bestScore = score; best = yaw; }
+        }
+
+        if (bestScore < -500) { // nenhum rumo serve: vai em direção ao centro da área
+            double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
+            double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
+            best = yawOf(cx - px, cz - pz);
+        }
+        lastTurnSign = MathHelper.wrapDegrees(best - cur) >= 0 ? 1 : -1;
+        heading = best;
+        headingTicks = 60 + RNG.nextInt(41); // 3 a 5 segundos
+    }
+
     private static void runFarm(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
         // se estava voando, volta para a física normal
         if (p.getAbilities().flying) {
             p.getAbilities().flying = false;
             p.sendAbilitiesUpdate();
         }
+        double px = p.getX(), pz = p.getZ();
 
-        // detector de travamento: tentou avançar quase o tempo todo e quase não saiu do lugar
+        // travou em algo (tentou avançar quase o tempo todo e quase não saiu do lugar): vira bastante
         if (++stuckTimer >= 20) {
             stuckTimer = 0;
-            if (lastCheckPos != null && target != null && forwardTicks >= 16
+            if (lastCheckPos != null && forwardTicks >= 16
                     && lastCheckPos.squaredDistanceTo(p.getPos()) < 0.25) {
-                if (targetBlock != null) badTargets.add(targetBlock);
-                target = null;
+                newHeading(p, 2);
             }
             lastCheckPos = p.getPos();
             forwardTicks = 0;
         }
 
-        // novo alvo quando: não há alvo, ficou velho, a planta já foi colhida/replantada,
-        // ou o bot está em cima dela e não consegue colher
-        boolean needNew = target == null
-                || ++targetAge > 240
-                || (targetBlock != null && !targetStillValid(mc));
-        if (!needNew) {
-            double ex = target.x - p.getX(), ez = target.z - p.getZ();
-            if (ex * ex + ez * ez < 0.81) {
-                if (targetBlock == null) needNew = true;          // ponto de passeio alcançado
-                else if (++closeTicks > 30) needNew = true;
-            }
-        }
-        if (needNew) {
-            if (targetBlock != null && (targetAge > 240 || closeTicks > 30)) badTargets.add(targetBlock);
-            closeTicks = 0;
-            pickTarget(p, false);
-            // de vez em quando uma micro-pausa, como uma pessoa
-            if (idleTicks <= 0 && RNG.nextInt(100) < 3) idleTicks = 6 + RNG.nextInt(14);
+        // rumo: fora da área volta ao centro; chegando na borda atravessa; senão troca a cada 3–5 s
+        if (!insideArea(px, pz, 0)) {
+            double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
+            double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
+            heading = yawOf(cx - px, cz - pz);
+            headingTicks = 30;
+        } else if (freeDist(px, pz, heading, EDGE_MARGIN) < wallTrigger()) {
+            newHeading(p, 1);
+        } else if (--headingTicks <= 0) {
+            newHeading(p, 0);
         }
 
-        // decide se anda / corre, conforme o quanto precisa virar
-        boolean forward = false, sprint = false;
-        if (target != null) {
-            double dx = target.x - p.getX(), dz = target.z - p.getZ();
-            double dist = Math.hypot(dx, dz);
-            float yawErr = Math.abs(MathHelper.wrapDegrees(yawOf(dx, dz) - p.getYaw()));
-            if (idleTicks > 0) {
-                idleTicks--;
-            } else if (!holdForBreak && dist > 0.6) {
-                forward = yawErr < 110f;                   // virada muito grande: gira parado
-                sprint = forward && yawErr < 55f && dist > 1.5;   // curva fechada: caminha, não corre
-            }
+        // anda / corre: caminha em viradas médias e gira parado só nas muito grandes
+        float yawErr = Math.abs(MathHelper.wrapDegrees(heading - p.getYaw()));
+        boolean forward = !holdForBreak && yawErr < 90f;
+        if (forward && freeDist(px, pz, p.getYaw(), 0.2) < 0.8 && insideArea(px, pz, 0.2)) {
+            forward = false;   // a câmera ainda aponta para a borda: termina de virar antes de andar
         }
+        boolean sprint = forward && yawErr < 50f;
 
         if (sprint && p.getHungerManager().getFoodLevel() <= 6) {
             if (!warnedHunger) {
@@ -618,6 +706,13 @@ public class FarmBot {
         } else if (p.isSprinting()) {
             p.setSprinting(false);
         }
+
+        // câmera: segue o rumo e varre o chão à frente (vai-e-vem lateral e de altura),
+        // passando a mira sobre as plantas; quem quebra é o farmAct, em todo tick
+        if (holdForBreak) { HumanLook.coast(p); return; }   // quebrando algo demorado: mira parada
+        float ty = heading + (float) (Math.sin(tickCounter * 0.13) * 12.0);
+        float tp = 36f + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 8.0);
+        HumanLook.step(p, ty, tp, true);
     }
 
     /** Escolhe o próximo alvo à FRENTE: perto, mas penalizando quem exige uma virada grande. */
