@@ -69,7 +69,11 @@ public class FarmBot {
     private static final Set<BlockPos> badTargets = new HashSet<>();
     private static int scanTimer, cooldown, targetAge, stuckTimer, statusTimer, tickCounter;
     private static Vec3d lastCheckPos;
-    private static boolean warnedFly;
+    private static boolean warnedFly, warnedHunger;
+    // corrida "de verdade" (teclas) no farm
+    private static boolean keysHeld;        // estamos segurando W/pulo
+    private static boolean breakingSlow;    // quebrando algo que demora (melancia etc.): para de andar
+    private static int closeTicks, forwardTicks;
 
     public static int targetCount() {
         return FarmConfig.task == FarmConfig.Task.FARM ? ready.size() : Math.max(mineCount, 0);
@@ -97,7 +101,9 @@ public class FarmBot {
         target = null; targetBlock = null; lastCheckPos = null; aimPoint = null;
         cmdVel = Vec3d.ZERO;
         idleTicks = 0;
-        scanTimer = 0; cooldown = 0; statusTimer = 0; warnedFly = false;
+        scanTimer = 0; cooldown = 0; statusTimer = 0; warnedFly = false; warnedHunger = false;
+        closeTicks = 0; forwardTicks = 0; breakingSlow = false;
+        HumanLook.reset();
         FarmConfig.enabled = true;
         msg(mc, mining ? "§aMineração LIGADA" : "§aFarm LIGADO");
     }
@@ -106,6 +112,8 @@ public class FarmBot {
         FarmConfig.enabled = false;
         cmdVel = Vec3d.ZERO;
         aimPoint = null;
+        releaseKeys(mc);
+        HumanLook.reset();
         if (message != null) msg(mc, message);
     }
 
@@ -115,9 +123,15 @@ public class FarmBot {
         ClientPlayerEntity p = mc.player;
         if (p == null || mc.world == null || mc.interactionManager == null) {
             FarmConfig.enabled = false;
+            releaseKeys(mc);
             return;
         }
-        if (mc.currentScreen != null) { cmdVel = Vec3d.ZERO; return; }
+        if (mc.currentScreen != null) {
+            cmdVel = Vec3d.ZERO;
+            releaseKeys(mc);
+            HumanLook.reset();
+            return;
+        }
 
         tickCounter++;
         if (tickCounter % 600 == 0) badTargets.clear();
@@ -146,7 +160,15 @@ public class FarmBot {
             move(mc, p, acted);
             updateLook(p);
         } else {
-            move(mc, p, false);        // escolhe o alvo e corre até ele
+            boolean holdForBreak = breakingSlow;   // veio do tick anterior
+            breakingSlow = false;
+            if (wantsFly(mc, p)) {
+                releaseKeys(mc);
+                move(mc, p, false);                // voando: movimento por velocidade
+            } else {
+                cmdVel = Vec3d.ZERO;
+                runFarm(mc, p, holdForBreak);      // corrida de verdade (W + sprint)
+            }
             setFarmAim(p);             // mira (suave) na planta alvo
             updateLook(p);             // gira a câmera
             if (cooldown > 0) cooldown--; else farmAct(mc, p); // só age no que está sob a mira
@@ -264,6 +286,8 @@ public class FarmBot {
                 replantQueue.put(pos, crop);
             }
             cooldown = 1 + RNG.nextInt(3); // ritmo humano entre uma quebra e outra
+        } else if (!p.getAbilities().creativeMode && bs.getHardness(mc.world, pos) > 0) {
+            breakingSlow = true; // ainda quebrando (melancia, abóbora...): para de andar até terminar
         }
     }
 
@@ -425,18 +449,11 @@ public class FarmBot {
     }
 
     // ==================================================================
-    //            MOVIMENTO SUAVE (andando/voando) + CÂMERA
+    //     MOVIMENTO POR VELOCIDADE (voo / mineração) + CÂMERA
     // ==================================================================
     private static void move(MinecraftClient mc, ClientPlayerEntity p, boolean hold) {
         boolean farm = FarmConfig.task == FarmConfig.Task.FARM;
-        boolean fly = FarmConfig.mode == FarmConfig.Mode.FLY;
-        if (fly && !p.getAbilities().allowFlying) {
-            if (!warnedFly) {
-                msg(mc, "§eVocê não pode voar (precisa de modo criativo). Usando modo andando.");
-                warnedFly = true;
-            }
-            fly = false;
-        }
+        boolean fly = wantsFly(mc, p);
 
         boolean needNew = target == null
                 || ++targetAge > 300
@@ -501,6 +518,136 @@ public class FarmBot {
         }
     }
 
+    // ==================================================================
+    //        CORRIDA HUMANIZADA (farm andando): W + sprint de verdade
+    // ==================================================================
+
+    /** Voar só se o jogador escolheu voar E pode voar (criativo). */
+    private static boolean wantsFly(MinecraftClient mc, ClientPlayerEntity p) {
+        if (FarmConfig.mode != FarmConfig.Mode.FLY) return false;
+        if (p.getAbilities().allowFlying) return true;
+        if (!warnedFly) {
+            msg(mc, "§eVocê não pode voar (precisa de modo criativo). Usando modo correndo.");
+            warnedFly = true;
+        }
+        return false;
+    }
+
+    /** Solta as teclas que o bot estava segurando (para não ficar andando sozinho). */
+    private static void releaseKeys(MinecraftClient mc) {
+        if (!keysHeld) return;
+        keysHeld = false;
+        mc.options.forwardKey.setPressed(false);
+        mc.options.jumpKey.setPressed(false);
+        if (mc.player != null && mc.player.isSprinting()) mc.player.setSprinting(false);
+    }
+
+    /**
+     * Corre de verdade (tecla de andar + sprint) em direção ao próximo alvo, sem parar entre
+     * uma planta e outra. A direção é controlada só pela câmera (que gira devagar), então o
+     * caminho faz curvas suaves, como um jogador segurando W e movendo o mouse.
+     */
+    private static void runFarm(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
+        // se estava voando, volta para a física normal
+        if (p.getAbilities().flying) {
+            p.getAbilities().flying = false;
+            p.sendAbilitiesUpdate();
+        }
+
+        // detector de travamento: tentou avançar quase o tempo todo e quase não saiu do lugar
+        if (++stuckTimer >= 20) {
+            stuckTimer = 0;
+            if (lastCheckPos != null && target != null && forwardTicks >= 16
+                    && lastCheckPos.squaredDistanceTo(p.getPos()) < 0.25) {
+                if (targetBlock != null) badTargets.add(targetBlock);
+                target = null;
+            }
+            lastCheckPos = p.getPos();
+            forwardTicks = 0;
+        }
+
+        // novo alvo quando: não há alvo, ficou velho, a planta já foi colhida/replantada,
+        // ou o bot está em cima dela e não consegue colher
+        boolean needNew = target == null
+                || ++targetAge > 240
+                || (targetBlock != null && !targetStillValid(mc));
+        if (!needNew) {
+            double ex = target.x - p.getX(), ez = target.z - p.getZ();
+            if (ex * ex + ez * ez < 0.81) {
+                if (targetBlock == null) needNew = true;          // ponto de passeio alcançado
+                else if (++closeTicks > 30) needNew = true;
+            }
+        }
+        if (needNew) {
+            if (targetBlock != null && (targetAge > 240 || closeTicks > 30)) badTargets.add(targetBlock);
+            closeTicks = 0;
+            pickTarget(p, false);
+            // de vez em quando uma micro-pausa, como uma pessoa
+            if (idleTicks <= 0 && RNG.nextInt(100) < 3) idleTicks = 6 + RNG.nextInt(14);
+        }
+
+        // decide se anda / corre, conforme o quanto precisa virar
+        boolean forward = false, sprint = false;
+        if (target != null) {
+            double dx = target.x - p.getX(), dz = target.z - p.getZ();
+            double dist = Math.hypot(dx, dz);
+            float yawErr = Math.abs(MathHelper.wrapDegrees(yawOf(dx, dz) - p.getYaw()));
+            if (idleTicks > 0) {
+                idleTicks--;
+            } else if (!holdForBreak && dist > 0.6) {
+                forward = yawErr < 110f;                   // virada muito grande: gira parado
+                sprint = forward && yawErr < 55f && dist > 1.5;   // curva fechada: caminha, não corre
+            }
+        }
+
+        if (sprint && p.getHungerManager().getFoodLevel() <= 6) {
+            if (!warnedHunger) {
+                msg(mc, "§eFome baixa (6 ou menos): o personagem não consegue correr. Coma algo.");
+                warnedHunger = true;
+            }
+            sprint = false;
+        }
+
+        mc.options.forwardKey.setPressed(forward);
+        mc.options.jumpKey.setPressed(forward && p.horizontalCollision && p.isOnGround()); // sobe degraus
+        keysHeld = true;
+        if (forward) forwardTicks++;
+
+        if (sprint) {
+            if (!p.isSprinting() && !p.horizontalCollision) p.setSprinting(true);
+        } else if (p.isSprinting()) {
+            p.setSprinting(false);
+        }
+    }
+
+    /** Escolhe o próximo alvo à FRENTE: perto, mas penalizando quem exige uma virada grande. */
+    private static BlockPos pickAhead(ClientPlayerEntity p, List<BlockPos> cands) {
+        double px = p.getX(), pz = p.getZ();
+        float yaw = p.getYaw();
+        BlockPos best = null;
+        double bestCost = Double.MAX_VALUE;
+        for (BlockPos b : cands) {
+            double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
+            double dist = Math.sqrt(dx * dx + dz * dz);
+            double turn = dist < 1.0 ? 0 : Math.abs(MathHelper.wrapDegrees(yawOf(dx, dz) - yaw));
+            double cost = dist + turn / 22.0 + RNG.nextDouble() * 1.2; // 180° custa ~8 blocos
+            if (cost < bestCost) { bestCost = cost; best = b; }
+        }
+        return best;
+    }
+
+    /** Escolha usada na mineração: aleatória, favorecendo os mais próximos. */
+    private static BlockPos pickNearRandom(ClientPlayerEntity p, List<BlockPos> candidates) {
+        final double px = p.getX(), pz = p.getZ();
+        candidates.sort(Comparator.comparingDouble(b -> {
+            double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
+            return dx * dx + dz * dz;
+        }));
+        int k = Math.min(candidates.size(), 8);
+        int idx = (int) (Math.pow(RNG.nextDouble(), 1.6) * k);
+        return candidates.get(Math.min(idx, candidates.size() - 1));
+    }
+
     private static boolean targetStillValid(MinecraftClient mc) {
         if (FarmConfig.task == FarmConfig.Task.MINE) {
             return !mc.world.getBlockState(targetBlock).isAir();
@@ -534,14 +681,7 @@ public class FarmBot {
         candidates.removeIf(badTargets::contains);
 
         if (!candidates.isEmpty()) {
-            final double px = p.getX(), pz = p.getZ();
-            candidates.sort(Comparator.comparingDouble(b -> {
-                double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
-                return dx * dx + dz * dz;
-            }));
-            int k = Math.min(candidates.size(), 8);
-            int idx = (int) (Math.pow(RNG.nextDouble(), 1.6) * k);
-            BlockPos c = candidates.get(Math.min(idx, candidates.size() - 1));
+            BlockPos c = mine ? pickNearRandom(p, candidates) : pickAhead(p, candidates);
             targetBlock = c;
             aimOffset = new Vec3d((RNG.nextDouble() - 0.5) * 0.4,
                     (RNG.nextDouble() - 0.5) * 0.2, (RNG.nextDouble() - 0.5) * 0.4);
@@ -566,31 +706,22 @@ public class FarmBot {
 
     private static void updateLook(ClientPlayerEntity p) {
         float ty, tp;
-        if (aimPoint != null) {
+        boolean aiming = aimPoint != null;
+        if (aiming) {
             Vec3d e = p.getEyePos();
             double dx = aimPoint.x - e.x, dy = aimPoint.y - e.y, dz = aimPoint.z - e.z;
             double h = Math.sqrt(dx * dx + dz * dz);
             ty = yawOf(dx, dz);
             tp = (float) -Math.toDegrees(Math.atan2(dy, h));
         } else if (target != null && idleTicks <= 0) {
-            ty = yawOf(target.x - p.getX(), target.z - p.getZ())
-                    + (float) (Math.sin(tickCounter * 0.05) * 1.5);
-            tp = 18f + (float) (Math.sin(tickCounter * 0.07) * 2.0);
+            // longe da planta: olha na direção da corrida, levemente para baixo
+            ty = yawOf(target.x - p.getX(), target.z - p.getZ());
+            tp = 22f;
         } else {
+            HumanLook.coast(p);
             return;
         }
-        smoothLook(p, ty, tp, 16f, 10f);
-    }
-
-    /** Gira a câmera com easing e limite de velocidade por tick (sem viradas bruscas). */
-    private static void smoothLook(ClientPlayerEntity p, float targetYaw, float targetPitch,
-                                   float maxYawStep, float maxPitchStep) {
-        float dy = MathHelper.wrapDegrees(targetYaw - p.getYaw());
-        float dp = targetPitch - p.getPitch();
-        float stepY = MathHelper.clamp(dy * 0.28f, -maxYawStep, maxYawStep);
-        float stepP = MathHelper.clamp(dp * 0.28f, -maxPitchStep, maxPitchStep);
-        p.setYaw(p.getYaw() + stepY);
-        p.setPitch(MathHelper.clamp(p.getPitch() + stepP, -90f, 90f));
+        HumanLook.step(p, ty, tp, aiming);
     }
 
     static void msg(MinecraftClient mc, String s) {

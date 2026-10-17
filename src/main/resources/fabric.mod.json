@@ -3,7 +3,7 @@
   "id": "farmbot",
   "version": "${version}",
   "name": "Farm Bot",
-  "description": "Farm automático em área demarcada: trigo, cenoura, batata e mais. Anda ou voa de forma aleatória.",
+  "description": "Farm automático em área demarcada: trigo, cenoura, batata e mais. Corre (ou voa) de forma humanizada, com câmera suave.",
   "authors": ["Você"],
   "license": "MIT",
   "environment": "client",

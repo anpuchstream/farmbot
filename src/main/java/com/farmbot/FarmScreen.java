@@ -208,7 +208,7 @@ public class FarmScreen extends Screen {
     }
 
     private Text moveText() {
-        return Text.literal("Movimento: " + (FarmConfig.mode == FarmConfig.Mode.WALK ? "Andando" : "Voando"));
+        return Text.literal("Movimento: " + (FarmConfig.mode == FarmConfig.Mode.WALK ? "Correndo" : "Voando"));
     }
 
     private Text replantText() {
