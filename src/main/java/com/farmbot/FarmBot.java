@@ -5,12 +5,14 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
@@ -137,6 +139,32 @@ public class FarmBot {
     private static Vec3d guardPos;
     private static boolean guardWasInside;
 
+    // --- alerta sonoro ---
+    private static final int ALERT_REPEATS = 3;     // quantos toques de sino
+    private static final int ALERT_INTERVAL = 12;   // ticks entre os toques (~0,6 s)
+    private static int alertLeft, alertDelay;
+
+    /** Para o bot por um motivo da proteção e dispara o som de alerta. */
+    private static void guardStop(MinecraftClient mc, String message) {
+        stop(mc, message);
+        alert();
+    }
+
+    private static void alert() {
+        alertLeft = ALERT_REPEATS;
+        alertDelay = 0;
+    }
+
+    /** Toca os toques pendentes do alerta. Roda todo tick, mesmo com o bot desligado. */
+    private static void tickAlert(MinecraftClient mc) {
+        if (alertLeft <= 0) return;
+        if (alertDelay > 0) { alertDelay--; return; }
+        // categoria MASTER, sem posição: toca no volume cheio, mesmo em tela de menu/carregamento
+        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_BELL_USE, 1.0f, 1.0f));
+        alertLeft--;
+        alertDelay = ALERT_INTERVAL;
+    }
+
     /** Guarda a "foto" do estado no momento em que o bot é ligado. */
     private static void armGuard(MinecraftClient mc) {
         guardPlayer = mc.player;
@@ -156,7 +184,7 @@ public class FarmBot {
         // 1) Servidor reiniciou / troca de servidor via proxy / respawn / mudou de dimensão:
         //    o jogo cria instâncias novas de jogador e mundo, mesmo sem desconectar.
         if (p != guardPlayer || mc.world != guardWorld) {
-            stop(mc, "§cFarm Bot parado: o servidor reiniciou ou você mudou de mundo/respawnou.");
+            guardStop(mc, "§cFarm Bot parado: o servidor reiniciou ou você mudou de mundo/respawnou.");
             return false;
         }
 
@@ -164,7 +192,7 @@ public class FarmBot {
 
         // 2) Teleporte: salto grande de posição entre dois ticks.
         if (guardPos != null && pos.squaredDistanceTo(guardPos) > TELEPORT_DIST * TELEPORT_DIST) {
-            stop(mc, "§cFarm Bot parado: você foi teleportado.");
+            guardStop(mc, "§cFarm Bot parado: você foi teleportado.");
             return false;
         }
         guardPos = pos;
@@ -174,7 +202,7 @@ public class FarmBot {
         if (nearArea(pos)) {
             guardWasInside = true;
         } else if (guardWasInside) {
-            stop(mc, "§cFarm Bot parado: você saiu da área demarcada.");
+            guardStop(mc, "§cFarm Bot parado: você saiu da área demarcada.");
             return false;
         }
         return true;
@@ -182,11 +210,13 @@ public class FarmBot {
 
     // ------------------------------------------------------------------
     public static void tick(MinecraftClient mc) {
+        tickAlert(mc);
         if (!FarmConfig.enabled) return;
         ClientPlayerEntity p = mc.player;
         if (p == null || mc.world == null || mc.interactionManager == null) {
             FarmConfig.enabled = false;
             releaseKeys(mc);
+            alert();   // conexão perdida (servidor reiniciou/caiu): avisa também
             return;
         }
 

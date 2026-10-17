@@ -7,20 +7,20 @@ import java.util.Random;
 
 /**
  * Câmera "humana". Em vez de pular para o ângulo desejado, ela controla a VELOCIDADE angular:
- * acelera devagar, chega a uma velocidade máxima baixa e desacelera antes de parar no alvo
- * (movimento em "S", como o mouse de uma pessoa). Também tem um leve balanço natural.
+ * acelera, chega a uma velocidade máxima de giro normal (~360°/s) e desacelera antes de parar
+ * no alvo (movimento em "S", como o mouse de uma pessoa). Também tem um leve balanço natural.
  */
 public final class HumanLook {
     private static final Random RNG = new Random();
 
-    /** Velocidade máxima de giro (graus por tick). 6.5 = ~130°/s. */
-    private static final float MAX_YAW_SPEED = 6.5f;
+    /** Velocidade máxima de giro (graus por tick). 18 = ~360°/s (era 6.5 = ~130°/s, parecia câmera lenta). */
+    private static final float MAX_YAW_SPEED = 18.0f;
     private static final float MAX_PITCH_SPEED = 4.0f;
     /** Aceleração máxima (graus por tick²): quanto menor, mais suave o início/fim do giro. */
-    private static final float YAW_ACCEL = 1.0f;
+    private static final float YAW_ACCEL = 3.5f;
     private static final float PITCH_ACCEL = 0.7f;
     /** Quão rápido a velocidade desejada cai conforme o erro diminui (frenagem suave). */
-    private static final float GAIN = 0.14f;
+    private static final float GAIN = 0.25f;
 
     private static float yawVel, pitchVel;
     private static float phaseA, phaseB;
