@@ -5,10 +5,12 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
@@ -106,6 +108,7 @@ public class FarmBot {
         forwardTicks = 0; breakingSlow = false; headingTicks = 0; rightClickCooldown = 0;
         heading = mc.player.getYaw();
         HumanLook.reset();
+        armGuard(mc);
         FarmConfig.enabled = true;
         msg(mc, mining ? "§aMineração LIGADA" : "§aFarm LIGADO");
     }
@@ -120,6 +123,64 @@ public class FarmBot {
     }
 
     // ------------------------------------------------------------------
+    //  PROTEÇÃO: reinício do servidor / teleporte / saída da área demarcada
+    // ------------------------------------------------------------------
+    /** Blocos em 1 tick a partir dos quais consideramos teleporte (voo normal ~0.3-0.5/tick). */
+    private static final double TELEPORT_DIST = 8.0;
+    /** Folga horizontal além da borda da área antes de considerar "fora". */
+    private static final double SLACK_XZ = 3.0;
+    /** Folga vertical (o farm já aceita V_TOL=2 acima/abaixo). */
+    private static final double SLACK_Y = 4.0;
+
+    private static ClientPlayerEntity guardPlayer;
+    private static ClientWorld guardWorld;
+    private static Vec3d guardPos;
+    private static boolean guardWasInside;
+
+    /** Guarda a "foto" do estado no momento em que o bot é ligado. */
+    private static void armGuard(MinecraftClient mc) {
+        guardPlayer = mc.player;
+        guardWorld = mc.world;
+        guardPos = mc.player.getPos();
+        guardWasInside = nearArea(guardPos);
+    }
+
+    private static boolean nearArea(Vec3d v) {
+        return v.x >= FarmConfig.minX() - SLACK_XZ && v.x <= FarmConfig.maxX() + 1 + SLACK_XZ
+                && v.z >= FarmConfig.minZ() - SLACK_XZ && v.z <= FarmConfig.maxZ() + 1 + SLACK_XZ
+                && v.y >= FarmConfig.minY() - SLACK_Y && v.y <= FarmConfig.maxY() + 1 + SLACK_Y;
+    }
+
+    /** @return true se pode continuar; false se o bot foi parado. */
+    private static boolean safetyGuard(MinecraftClient mc, ClientPlayerEntity p) {
+        // 1) Servidor reiniciou / troca de servidor via proxy / respawn / mudou de dimensão:
+        //    o jogo cria instâncias novas de jogador e mundo, mesmo sem desconectar.
+        if (p != guardPlayer || mc.world != guardWorld) {
+            stop(mc, "§cFarm Bot parado: o servidor reiniciou ou você mudou de mundo/respawnou.");
+            return false;
+        }
+
+        Vec3d pos = p.getPos();
+
+        // 2) Teleporte: salto grande de posição entre dois ticks.
+        if (guardPos != null && pos.squaredDistanceTo(guardPos) > TELEPORT_DIST * TELEPORT_DIST) {
+            stop(mc, "§cFarm Bot parado: você foi teleportado.");
+            return false;
+        }
+        guardPos = pos;
+
+        // 3) Fora da área demarcada. Só vale depois de já ter estado dentro, para não
+        //    desligar o bot se você ligar de longe e ele ainda estiver indo até a área.
+        if (nearArea(pos)) {
+            guardWasInside = true;
+        } else if (guardWasInside) {
+            stop(mc, "§cFarm Bot parado: você saiu da área demarcada.");
+            return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------
     public static void tick(MinecraftClient mc) {
         if (!FarmConfig.enabled) return;
         ClientPlayerEntity p = mc.player;
@@ -128,6 +189,10 @@ public class FarmBot {
             releaseKeys(mc);
             return;
         }
+
+        // Antes do check de tela: teleporte/troca de mundo abrem a tela de carregamento.
+        if (!safetyGuard(mc, p)) return;
+
         if (mc.currentScreen != null) {
             cmdVel = Vec3d.ZERO;
             releaseKeys(mc);
@@ -265,6 +330,12 @@ public class FarmBot {
         if (crop.usesShears()) {
             int sh = findHotbarSlot(p, Items.SHEARS);
             if (sh >= 0) p.getInventory().selectedSlot = sh;
+        } else if (crop.category == Crop.Category.CORAL) {
+            // Corais: só machado ou enxada (planta/leque têm dureza 0, então vem antes do check de dureza).
+            if (!selectAxeOrHoe(p, bs)) {
+                stop(mc, "§cColoque um machado ou enxada na hotbar para quebrar corais.");
+                return;
+            }
         } else if (bs.getHardness(mc.world, pos) > 0) {
             selectBestTool(p, bs);
         }
@@ -447,6 +518,24 @@ public class FarmBot {
             if (score > bestScore) { bestScore = score; bestSlot = i; }
         }
         p.getInventory().selectedSlot = bestSlot;
+    }
+
+    /** Seleciona, na hotbar, o machado ou enxada mais rápido para o bloco. false = não tem nenhum. */
+    private static boolean selectAxeOrHoe(ClientPlayerEntity p, BlockState state) {
+        int best = -1;
+        float bestSpeed = -1f;
+        for (int i = 0; i < 9; i++) {
+            ItemStack st = p.getInventory().getStack(i);
+            if (st.isEmpty()) continue;
+            if (!(st.isIn(ItemTags.AXES) || st.isIn(ItemTags.HOES))) continue;
+            // mesma regra do selectBestTool: não usar ferramenta quase quebrando
+            if (st.isDamageable() && st.getMaxDamage() - st.getDamage() <= 2) continue;
+            float speed = st.getMiningSpeedMultiplier(state);
+            if (speed > bestSpeed) { bestSpeed = speed; best = i; }
+        }
+        if (best < 0) return false;
+        p.getInventory().selectedSlot = best;
+        return true;
     }
 
     // ==================================================================

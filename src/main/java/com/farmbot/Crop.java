@@ -67,6 +67,24 @@ public enum Crop {
     SEA_PICKLE(Category.AQUATIC, "Pepino-do-mar", Blocks.SEA_PICKLE),
     LILY_PAD(Category.AQUATIC, "Vitória-régia", Blocks.LILY_PAD),
 
+    // ===================== CORAIS (só quebra, sem replantar; machado/enxada) =====================
+    CORAL_TUBE(Category.CORAL, "Coral-tubo",
+            Blocks.TUBE_CORAL, Blocks.TUBE_CORAL_FAN, Blocks.TUBE_CORAL_WALL_FAN),
+    CORAL_BRAIN(Category.CORAL, "Coral-cérebro",
+            Blocks.BRAIN_CORAL, Blocks.BRAIN_CORAL_FAN, Blocks.BRAIN_CORAL_WALL_FAN),
+    CORAL_BUBBLE(Category.CORAL, "Coral-bolha",
+            Blocks.BUBBLE_CORAL, Blocks.BUBBLE_CORAL_FAN, Blocks.BUBBLE_CORAL_WALL_FAN),
+    CORAL_FIRE(Category.CORAL, "Coral-de-fogo",
+            Blocks.FIRE_CORAL, Blocks.FIRE_CORAL_FAN, Blocks.FIRE_CORAL_WALL_FAN),
+    CORAL_HORN(Category.CORAL, "Coral-chifre",
+            Blocks.HORN_CORAL, Blocks.HORN_CORAL_FAN, Blocks.HORN_CORAL_WALL_FAN),
+    CORAL_DEAD(Category.CORAL, "Corais mortos",
+            Blocks.DEAD_TUBE_CORAL, Blocks.DEAD_TUBE_CORAL_FAN, Blocks.DEAD_TUBE_CORAL_WALL_FAN,
+            Blocks.DEAD_BRAIN_CORAL, Blocks.DEAD_BRAIN_CORAL_FAN, Blocks.DEAD_BRAIN_CORAL_WALL_FAN,
+            Blocks.DEAD_BUBBLE_CORAL, Blocks.DEAD_BUBBLE_CORAL_FAN, Blocks.DEAD_BUBBLE_CORAL_WALL_FAN,
+            Blocks.DEAD_FIRE_CORAL, Blocks.DEAD_FIRE_CORAL_FAN, Blocks.DEAD_FIRE_CORAL_WALL_FAN,
+            Blocks.DEAD_HORN_CORAL, Blocks.DEAD_HORN_CORAL_FAN, Blocks.DEAD_HORN_CORAL_WALL_FAN),
+
     // ===================== OUTRAS =====================
     VINE(Category.OTHER, "Trepadeira", Blocks.VINE),
     GLOW_LICHEN(Category.OTHER, "Líquen luminoso", Blocks.GLOW_LICHEN),
@@ -92,6 +110,7 @@ public enum Crop {
         FLOWERS("Flores", "Flores"),
         GRASSES("Gramas", "Gramas"),
         AQUATIC("Algas/Água", "Algas"),
+        CORAL("Corais", "Corais"),
         OTHER("Outras", "Outras"),
         SAPLINGS("Mudas de árvores", "Mudas");
 

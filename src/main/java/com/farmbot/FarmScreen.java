@@ -76,9 +76,10 @@ public class FarmScreen extends Screen {
             refreshWidgets();
         }).dimensions(left + 160, 42, 150, 20).build());
 
-        // Abas de categoria (todas visíveis): Plantas | Flores | Gramas | Algas | Outras | Mudas
+        // Abas de categoria (todas visíveis): Plantas | Flores | Gramas | Algas | Corais | Outras | Mudas
         Crop.Category[] cats = Crop.Category.values();
-        int tabW = 50, gap = 2; // 6*50 + 5*2 = 310
+        int gap = 2;
+        int tabW = (310 - gap * (cats.length - 1)) / cats.length; // mantém o painel de 310 de largura
         for (int i = 0; i < cats.length; i++) {
             final Crop.Category cat = cats[i];
             tabBtns[i] = addDrawableChild(ButtonWidget.builder(Text.literal(cat.shortLabel), b -> {
