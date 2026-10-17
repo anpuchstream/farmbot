@@ -19,10 +19,11 @@ public class FarmScreen extends Screen {
 
     private final TextFieldWidget[] fields = new TextFieldWidget[6];
     private final ButtonWidget[] cropSlots = new ButtonWidget[SLOTS];
+    private final ButtonWidget[] tabBtns = new ButtonWidget[Crop.Category.values().length];
     private ButtonWidget taskBtn, moveBtn, replantBtn, mineModeBtn, startBtn;
-    private ButtonWidget catBtn, prevBtn, nextBtn, allBtn, noneBtn;
+    private ButtonWidget prevBtn, nextBtn, allBtn, noneBtn;
 
-    private int labelAreaY, pos1Y, pos2Y, statusY;
+    private int pagerY, labelAreaY, pos1Y, pos2Y, statusY;
 
     public FarmScreen() {
         super(Text.literal("Farm Bot"));
@@ -75,45 +76,52 @@ public class FarmScreen extends Screen {
             refreshWidgets();
         }).dimensions(left + 160, 42, 150, 20).build());
 
-        // Linha do seletor: categoria, páginas, marcar/desmarcar categoria
-        catBtn = addDrawableChild(ButtonWidget.builder(Text.empty(), b -> {
-            Crop.Category[] v = Crop.Category.values();
-            category = v[(category.ordinal() + 1) % v.length];
-            cropPage = 0;
-            refreshWidgets();
-        }).dimensions(left, 63, 150, 14).build());
+        // Abas de categoria (todas visíveis): Plantas | Flores | Gramas | Algas | Outras | Mudas
+        Crop.Category[] cats = Crop.Category.values();
+        int tabW = 50, gap = 2; // 6*50 + 5*2 = 310
+        for (int i = 0; i < cats.length; i++) {
+            final Crop.Category cat = cats[i];
+            tabBtns[i] = addDrawableChild(ButtonWidget.builder(Text.literal(cat.shortLabel), b -> {
+                category = cat;
+                cropPage = 0;
+                refreshWidgets();
+            }).dimensions(left + i * (tabW + gap), 65, tabW, 14).build());
+        }
+
+        // Linha do paginador: < > Todas Nenhuma (valem para a aba atual)
+        pagerY = 81;
         prevBtn = addDrawableChild(ButtonWidget.builder(Text.literal("<"), b -> {
             cropPage = (cropPage - 1 + pageCount()) % pageCount();
             refreshWidgets();
-        }).dimensions(left + 154, 63, 18, 14).build());
+        }).dimensions(left + 154, pagerY, 18, 14).build());
         nextBtn = addDrawableChild(ButtonWidget.builder(Text.literal(">"), b -> {
             cropPage = (cropPage + 1) % pageCount();
             refreshWidgets();
-        }).dimensions(left + 174, 63, 18, 14).build());
+        }).dimensions(left + 174, pagerY, 18, 14).build());
         allBtn = addDrawableChild(ButtonWidget.builder(Text.literal("Todas"), b -> {
             FarmConfig.crops.addAll(list());
             refreshWidgets();
-        }).dimensions(left + 196, 63, 56, 14).build());
+        }).dimensions(left + 196, pagerY, 56, 14).build());
         noneBtn = addDrawableChild(ButtonWidget.builder(Text.literal("Nenhuma"), b -> {
             FarmConfig.crops.removeAll(list());
             refreshWidgets();
-        }).dimensions(left + 256, 63, 54, 14).build());
+        }).dimensions(left + 256, pagerY, 54, 14).build());
 
         // Grade de plantas (8 por página)
         for (int i = 0; i < SLOTS; i++) {
             final int slot = i;
             int bx = left + (i % 2) * 160;
-            int by = 79 + (i / 2) * 21;
+            int by = 97 + (i / 2) * 20;
             cropSlots[i] = addDrawableChild(ButtonWidget.builder(Text.empty(), btn -> {
                 Crop c = cropAt(slot);
                 if (c == null) return;
                 if (!FarmConfig.crops.remove(c)) FarmConfig.crops.add(c);
                 refreshWidgets();
-            }).dimensions(bx, by, 150, 20).build());
+            }).dimensions(bx, by, 150, 18).build());
         }
 
         // Área
-        labelAreaY = 79 + 4 * 21 + 4;
+        labelAreaY = 97 + 4 * 20 + 3;
         pos1Y = labelAreaY + 12;
         pos2Y = pos1Y + 22;
         buildPosRow(0, pos1Y, left, cx);
@@ -170,9 +178,13 @@ public class FarmScreen extends Screen {
         replantBtn.active = farm;
         mineModeBtn.active = !farm;
 
-        catBtn.setMessage(Text.literal("Tipo: " + category.label
-                + " (" + (cropPage + 1) + "/" + pageCount() + ")"));
-        catBtn.active = farm;
+        Crop.Category[] cats = Crop.Category.values();
+        for (int i = 0; i < cats.length; i++) {
+            boolean sel = cats[i] == category;
+            tabBtns[i].setMessage(Text.literal(cats[i].shortLabel)
+                    .formatted(sel ? Formatting.YELLOW : Formatting.WHITE));
+            tabBtns[i].active = farm;
+        }
         prevBtn.active = farm;
         nextBtn.active = farm;
         allBtn.active = farm;
@@ -230,6 +242,9 @@ public class FarmScreen extends Screen {
         boolean farm = FarmConfig.task == FarmConfig.Task.FARM;
 
         ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Farm Bot"), cx, 7, 0xFFFFFF);
+        ctx.drawTextWithShadow(textRenderer,
+                Text.literal(category.label + " — pág. " + (cropPage + 1) + "/" + pageCount()),
+                left, pagerY + 3, farm ? 0xFFFF55 : 0x777777);
         ctx.drawTextWithShadow(textRenderer, Text.literal("Área (X Y Z dos dois cantos):"), left, labelAreaY, 0xAAAAAA);
         ctx.drawTextWithShadow(textRenderer, Text.literal("Canto 1"), left, pos1Y + 5, 0xFFFFFF);
         ctx.drawTextWithShadow(textRenderer, Text.literal("Canto 2"), left, pos2Y + 5, 0xFFFFFF);

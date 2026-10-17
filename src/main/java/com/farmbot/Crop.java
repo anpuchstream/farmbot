@@ -72,19 +72,36 @@ public enum Crop {
     GLOW_LICHEN(Category.OTHER, "Líquen luminoso", Blocks.GLOW_LICHEN),
     RED_MUSHROOM(Category.OTHER, "Cogumelo vermelho", Blocks.RED_MUSHROOM),
     BROWN_MUSHROOM(Category.OTHER, "Cogumelo marrom", Blocks.BROWN_MUSHROOM),
-    SPORE_BLOSSOM(Category.OTHER, "Flor de esporos", Blocks.SPORE_BLOSSOM);
+    SPORE_BLOSSOM(Category.OTHER, "Flor de esporos", Blocks.SPORE_BLOSSOM),
 
-    /** Categorias exibidas na interface. */
+    // ===================== MUDAS DE ÁRVORES =====================
+    OAK_SAPLING(Category.SAPLINGS, "Muda de carvalho", Blocks.OAK_SAPLING),
+    SPRUCE_SAPLING(Category.SAPLINGS, "Muda de pinheiro", Blocks.SPRUCE_SAPLING),
+    BIRCH_SAPLING(Category.SAPLINGS, "Muda de bétula", Blocks.BIRCH_SAPLING),
+    JUNGLE_SAPLING(Category.SAPLINGS, "Muda da selva", Blocks.JUNGLE_SAPLING),
+    ACACIA_SAPLING(Category.SAPLINGS, "Muda de acácia", Blocks.ACACIA_SAPLING),
+    DARK_OAK_SAPLING(Category.SAPLINGS, "Muda carvalho escuro", Blocks.DARK_OAK_SAPLING),
+    CHERRY_SAPLING(Category.SAPLINGS, "Muda de cerejeira", Blocks.CHERRY_SAPLING),
+    MANGROVE_PROPAGULE(Category.SAPLINGS, "Propágulo de mangue", Blocks.MANGROVE_PROPAGULE),
+    AZALEA(Category.SAPLINGS, "Azaleia", Blocks.AZALEA),
+    FLOWERING_AZALEA(Category.SAPLINGS, "Azaleia florida", Blocks.FLOWERING_AZALEA);
+
+    /** Categorias exibidas na interface (abas). */
     public enum Category {
-        CROPS("Plantações"),
-        FLOWERS("Flores"),
-        GRASSES("Gramas"),
-        AQUATIC("Algas/Água"),
-        OTHER("Outras");
+        CROPS("Plantações", "Plantas"),
+        FLOWERS("Flores", "Flores"),
+        GRASSES("Gramas", "Gramas"),
+        AQUATIC("Algas/Água", "Algas"),
+        OTHER("Outras", "Outras"),
+        SAPLINGS("Mudas de árvores", "Mudas");
 
         public final String label;
+        public final String shortLabel;
 
-        Category(String label) { this.label = label; }
+        Category(String label, String shortLabel) {
+            this.label = label;
+            this.shortLabel = shortLabel;
+        }
     }
 
     public final Category category;

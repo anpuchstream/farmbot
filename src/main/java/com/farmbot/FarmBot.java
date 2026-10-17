@@ -23,24 +23,32 @@ import net.minecraft.world.World;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
-/** Lógica principal: farm (colher/replantar) e mineração, com movimento suave e aleatório. */
+/**
+ * Farm "legit": o personagem corre pela área, mira (câmera suave) na planta e só quebra
+ * o bloco que está realmente sob a mira, como um jogador segurando o botão de ataque.
+ */
 public class FarmBot {
     private static final Random RNG = new Random();
+
+    /** Alcance real do clique (igual ao do jogo, 4.5 blocos). */
+    private static final double BREAK_RANGE = 4.5;
+    /** Distância a partir da qual a câmera começa a mirar na planta alvo. */
+    private static final double AIM_RANGE = 6.5;
+    /** Alcance usado na mineração para escolher blocos. */
     private static final double REACH = 4.0;
-    /** Tolerância vertical do farm: escaneia alguns blocos acima/abaixo da área marcada. */
+    /** Tolerância vertical do farm: aceita plantas alguns blocos acima/abaixo da área. */
     private static final int V_TOL = 2;
     private static final int MAX_VOLUME_FARM = 250_000;
     private static final int MAX_VOLUME_MINE = 100_000;
     private static final int MINE_SAMPLE = 200;
-    private static final double WALK_SPEED = 0.20; // blocos por tick (~4 blocos/s)
-    private static final double FLY_SPEED = 0.30;
+    private static final double WALK_SPEED = 0.25; // blocos por tick (~5 blocos/s, corrida)
+    private static final double FLY_SPEED = 0.32;
 
     // --- farm ---
     private static final List<BlockPos> ready = new ArrayList<>();
@@ -54,16 +62,15 @@ public class FarmBot {
     // --- movimento / câmera ---
     private static BlockPos targetBlock;
     private static Vec3d target;
-    private static Vec3d cmdVel = Vec3d.ZERO;          // velocidade comandada (suavizada)
-    private static Vec3d gaze;                          // ponto para onde olhar (ao colher/minerar)
-    private static int gazeTicks;
+    private static Vec3d aimOffset = Vec3d.ZERO;       // pequena variação de onde mirar
+    private static Vec3d cmdVel = Vec3d.ZERO;           // velocidade comandada (suavizada)
+    private static Vec3d aimPoint;                      // ponto para onde a câmera deve olhar
     private static int idleTicks;
-    private static final Set<BlockPos> badTargets = new HashSet<>(); // alvos inalcançáveis
+    private static final Set<BlockPos> badTargets = new HashSet<>();
     private static int scanTimer, cooldown, targetAge, stuckTimer, statusTimer, tickCounter;
     private static Vec3d lastCheckPos;
     private static boolean warnedFly;
 
-    /** Quantidade de alvos conhecidos (plantas prontas ou blocos a minerar). */
     public static int targetCount() {
         return FarmConfig.task == FarmConfig.Task.FARM ? ready.size() : Math.max(mineCount, 0);
     }
@@ -87,9 +94,9 @@ public class FarmBot {
         badTargets.clear();
         mineCount = 0;
         currentMine = null;
-        target = null; targetBlock = null; lastCheckPos = null; gaze = null;
+        target = null; targetBlock = null; lastCheckPos = null; aimPoint = null;
         cmdVel = Vec3d.ZERO;
-        gazeTicks = 0; idleTicks = 0;
+        idleTicks = 0;
         scanTimer = 0; cooldown = 0; statusTimer = 0; warnedFly = false;
         FarmConfig.enabled = true;
         msg(mc, mining ? "§aMineração LIGADA" : "§aFarm LIGADO");
@@ -98,6 +105,7 @@ public class FarmBot {
     public static void stop(MinecraftClient mc, String message) {
         FarmConfig.enabled = false;
         cmdVel = Vec3d.ZERO;
+        aimPoint = null;
         if (message != null) msg(mc, message);
     }
 
@@ -114,6 +122,7 @@ public class FarmBot {
         tickCounter++;
         if (tickCounter % 600 == 0) badTargets.clear();
         boolean mining = FarmConfig.task == FarmConfig.Task.MINE;
+        aimPoint = null;
 
         if (--scanTimer <= 0) {
             if (mining) {
@@ -131,16 +140,17 @@ public class FarmBot {
 
         if (++statusTimer >= 40) { statusTimer = 0; reportStatus(mc); }
 
-        boolean acted = false;
-        if (cooldown > 0) {
-            cooldown--;
+        if (mining) {
+            boolean acted = false;
+            if (cooldown > 0) cooldown--; else acted = tryMine(mc, p);
+            move(mc, p, acted);
+            updateLook(p);
         } else {
-            acted = mining ? tryMine(mc, p) : (tryReplant(mc, p) || tryBreak(mc, p));
+            move(mc, p, false);        // escolhe o alvo e corre até ele
+            setFarmAim(p);             // mira (suave) na planta alvo
+            updateLook(p);             // gira a câmera
+            if (cooldown > 0) cooldown--; else farmAct(mc, p); // só age no que está sob a mira
         }
-
-        // Farm: continua andando enquanto colhe. Mineração: para suavemente enquanto quebra.
-        move(mc, p, mining && acted);
-        updateLook(p);
     }
 
     private static void reportStatus(MinecraftClient mc) {
@@ -157,6 +167,12 @@ public class FarmBot {
     // ==================================================================
     //                              FARM
     // ==================================================================
+    private static boolean inFarmArea(BlockPos pos) {
+        return pos.getX() >= FarmConfig.minX() && pos.getX() <= FarmConfig.maxX()
+                && pos.getZ() >= FarmConfig.minZ() && pos.getZ() <= FarmConfig.maxZ()
+                && pos.getY() >= FarmConfig.minY() - V_TOL && pos.getY() <= FarmConfig.maxY() + V_TOL;
+    }
+
     private static void scanFarm(MinecraftClient mc) {
         ready.clear();
         BlockPos.Mutable m = new BlockPos.Mutable();
@@ -177,87 +193,78 @@ public class FarmBot {
         return null;
     }
 
-    private static boolean tryBreak(MinecraftClient mc, ClientPlayerEntity p) {
-        Vec3d eye = p.getEyePos();
-        BlockPos best = null;
-        double bd = REACH * REACH;
-        Iterator<BlockPos> it = ready.iterator();
-        while (it.hasNext()) {
-            BlockPos pos = it.next();
-            if (matchCrop(mc, pos) == null) { it.remove(); continue; }
-            double d = eye.squaredDistanceTo(Vec3d.ofCenter(pos));
-            if (d < bd) { bd = d; best = pos; }
+    /** Define o ponto de mira: a planta alvo (ou a terra onde vai replantar) quando está perto. */
+    private static void setFarmAim(ClientPlayerEntity p) {
+        if (targetBlock == null) return;
+        Vec3d c;
+        if (replantQueue.containsKey(targetBlock)) {
+            c = Vec3d.ofCenter(targetBlock.down()).add(aimOffset.x, 0.5, aimOffset.z);
+        } else {
+            c = Vec3d.ofCenter(targetBlock).add(aimOffset);
         }
-        if (best == null) return false;
+        if (p.getEyePos().squaredDistanceTo(c) <= AIM_RANGE * AIM_RANGE) aimPoint = c;
+    }
 
-        Crop crop = matchCrop(mc, best);
-        BlockState bs = mc.world.getBlockState(best);
+    /**
+     * Age SOMENTE no bloco que está sob a mira (como segurar o botão de ataque / clicar).
+     * Se a mira não estiver sobre uma planta pronta, não faz nada.
+     */
+    private static void farmAct(MinecraftClient mc, ClientPlayerEntity p) {
+        HitResult hr = p.raycast(BREAK_RANGE, 1.0f, false);
+        if (hr.getType() != HitResult.Type.BLOCK) return;
+        BlockHitResult bhr = (BlockHitResult) hr;
+        BlockPos pos = bhr.getBlockPos();
 
-        // ferramenta certa: tesoura para gramas/grama marinha, melhor ferramenta para blocos duros
-        if (crop != null && crop.usesShears()) {
+        // 1) replantar: mira na terra, face de cima, onde a planta foi colhida
+        BlockPos above = pos.up();
+        Crop rc = replantQueue.get(above);
+        if (rc != null && bhr.getSide() == Direction.UP && mc.world.getBlockState(above).isAir()) {
+            int slot = findHotbarSlot(p, rc.seed);
+            if (slot < 0) {
+                replantQueue.clear();
+                msg(mc, "§cSem sementes na hotbar: " + rc.label + " (não vou replantar).");
+                return;
+            }
+            p.getInventory().selectedSlot = slot;
+            mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, bhr);
+            p.swingHand(Hand.MAIN_HAND);
+            replantQueue.remove(above);
+            cooldown = 2 + RNG.nextInt(3);
+            return;
+        }
+
+        // 2) colher o bloco sob a mira
+        if (!inFarmArea(pos)) return;
+        Crop crop = matchCrop(mc, pos);
+        if (crop == null) return;
+
+        BlockState bs = mc.world.getBlockState(pos);
+        if (crop.usesShears()) {
             int sh = findHotbarSlot(p, Items.SHEARS);
             if (sh >= 0) p.getInventory().selectedSlot = sh;
-        } else if (bs.getHardness(mc.world, best) > 0) {
+        } else if (bs.getHardness(mc.world, pos) > 0) {
             selectBestTool(p, bs);
         }
 
-        setGaze(Vec3d.ofCenter(best));
-
-        if (crop != null && crop.usesRightClick()) {
-            // colhe com botão direito (a planta continua no lugar)
-            Vec3d hp = Vec3d.ofCenter(best);
-            BlockHitResult hit = new BlockHitResult(hp, Direction.UP, best, false);
-            mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, hit);
+        if (crop.usesRightClick()) {
+            mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, bhr);
             p.swingHand(Hand.MAIN_HAND);
-            ready.remove(best);
-            cooldown = 2;
-            return true;
+            ready.remove(pos);
+            cooldown = 3 + RNG.nextInt(3);
+            return;
         }
 
-        mc.interactionManager.updateBlockBreakingProgress(best, Direction.UP);
+        mc.interactionManager.updateBlockBreakingProgress(pos, bhr.getSide());
         p.swingHand(Hand.MAIN_HAND);
 
-        if (mc.world.getBlockState(best).isAir()) {
-            ready.remove(best);
-            if (FarmConfig.replant && crop != null && crop.seed != null) {
+        if (mc.world.getBlockState(pos).isAir()) {
+            ready.remove(pos);
+            if (FarmConfig.replant && crop.seed != null) {
                 if (replantQueue.size() > 2000) replantQueue.clear();
-                replantQueue.put(best, crop);
+                replantQueue.put(pos, crop);
             }
+            cooldown = 1 + RNG.nextInt(3); // ritmo humano entre uma quebra e outra
         }
-        return true;
-    }
-
-    private static boolean tryReplant(MinecraftClient mc, ClientPlayerEntity p) {
-        if (replantQueue.isEmpty()) return false;
-        Vec3d eye = p.getEyePos();
-        Iterator<Map.Entry<BlockPos, Crop>> it = replantQueue.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<BlockPos, Crop> e = it.next();
-            BlockPos pos = e.getKey();
-            Crop crop = e.getValue();
-
-            if (!mc.world.getBlockState(pos).isAir()) { it.remove(); continue; }
-            if (eye.squaredDistanceTo(Vec3d.ofCenter(pos)) > REACH * REACH) continue;
-
-            int slot = findHotbarSlot(p, crop.seed);
-            if (slot < 0) {
-                replantQueue.clear();
-                msg(mc, "§cSem sementes na hotbar: " + crop.label + " (não vou replantar).");
-                return false;
-            }
-            p.getInventory().selectedSlot = slot;
-
-            BlockPos below = pos.down();
-            Vec3d hitPos = Vec3d.ofCenter(below).add(0, 0.5, 0);
-            setGaze(hitPos);
-            BlockHitResult hit = new BlockHitResult(hitPos, Direction.UP, below, false);
-            mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, hit);
-            p.swingHand(Hand.MAIN_HAND);
-            it.remove();
-            cooldown = 1;
-            return true;
-        }
-        return false;
     }
 
     private static int findHotbarSlot(ClientPlayerEntity p, Item item) {
@@ -281,7 +288,6 @@ public class FarmBot {
                 || s.isOf(Blocks.ANCIENT_DEBRIS);
     }
 
-    /** O bloco tem alguma face em contato com ar/bloco não sólido? */
     private static boolean isExposed(World w, BlockPos pos) {
         for (Direction d : Direction.values()) {
             BlockPos n = pos.offset(d);
@@ -290,7 +296,6 @@ public class FarmBot {
         return false;
     }
 
-    /** Regras de segurança: o bloco pode ser minerado? */
     private static boolean isMinable(World w, BlockPos pos) {
         BlockState s = w.getBlockState(pos);
         if (s.isAir()) return false;
@@ -304,7 +309,6 @@ public class FarmBot {
         return true;
     }
 
-    /** Varredura da área inteira (a cada 5s): guarda uma amostra de alvos para o bot navegar. */
     private static void scanMine(MinecraftClient mc) {
         mineCandidates.clear();
         mineCount = 0;
@@ -326,7 +330,6 @@ public class FarmBot {
                 }
     }
 
-    /** Raycast do olho até o bloco; só retorna se o primeiro bloco atingido for ele (sem x-ray). */
     private static BlockHitResult rayTo(MinecraftClient mc, ClientPlayerEntity p, BlockPos pos) {
         Vec3d eye = p.getEyePos();
         Vec3d to = Vec3d.ofCenter(pos);
@@ -349,6 +352,7 @@ public class FarmBot {
         return true;
     }
 
+    /** Escolhe um bloco visível ao alcance, mira nele e só quebra quando a mira está sobre ele. */
     private static boolean tryMine(MinecraftClient mc, ClientPlayerEntity p) {
         BlockHitResult hit = null;
 
@@ -392,11 +396,18 @@ public class FarmBot {
 
         BlockState s = mc.world.getBlockState(currentMine);
         selectBestTool(p, s);
-        setGaze(hit.getPos());
-        mc.interactionManager.updateBlockBreakingProgress(currentMine, hit.getSide());
-        p.swingHand(Hand.MAIN_HAND);
+        aimPoint = hit.getPos();
 
-        if (mc.world.getBlockState(currentMine).isAir()) currentMine = null;
+        // só quebra quando a mira realmente está sobre o bloco
+        HitResult cr = p.raycast(BREAK_RANGE, 1.0f, false);
+        if (cr.getType() == HitResult.Type.BLOCK) {
+            BlockHitResult cb = (BlockHitResult) cr;
+            if (cb.getBlockPos().equals(currentMine)) {
+                mc.interactionManager.updateBlockBreakingProgress(currentMine, cb.getSide());
+                p.swingHand(Hand.MAIN_HAND);
+                if (mc.world.getBlockState(currentMine).isAir()) currentMine = null;
+            }
+        }
         return true;
     }
 
@@ -436,7 +447,7 @@ public class FarmBot {
             pickTarget(p, fly);
         }
 
-        // detector de travamento: se ficou parado, marca o alvo como inalcançável
+        // detector de travamento
         if (++stuckTimer >= 20) {
             stuckTimer = 0;
             if (lastCheckPos != null && target != null && !hold && idleTicks <= 0
@@ -447,7 +458,7 @@ public class FarmBot {
             lastCheckPos = p.getPos();
         }
 
-        // velocidade desejada (desacelera perto do alvo, leve variação natural)
+        // velocidade desejada: gira primeiro, corre depois (reduz se estiver olhando para outro lado)
         Vec3d desired = Vec3d.ZERO;
         if (target != null) {
             Vec3d to = target.subtract(p.getPos());
@@ -457,13 +468,15 @@ public class FarmBot {
                 idleTicks--;
             } else if (!hold && dist > 0.05) {
                 Vec3d dir = (fly ? to : flat).normalize();
-                double slow = MathHelper.clamp(dist / 2.5, 0.25, 1.0);
-                double wobble = 1.0 + 0.07 * Math.sin(tickCounter * 0.09);
-                desired = dir.multiply((fly ? FLY_SPEED : WALK_SPEED) * slow * wobble);
+                float wantYaw = yawOf(to.x, to.z);
+                float dyaw = Math.abs(MathHelper.wrapDegrees(wantYaw - p.getYaw()));
+                double turn = MathHelper.clamp(1.0 - dyaw / 100.0, 0.15, 1.0);
+                double slow = MathHelper.clamp(dist / 2.0, 0.3, 1.0);
+                double wobble = 1.0 + 0.06 * Math.sin(tickCounter * 0.09);
+                desired = dir.multiply((fly ? FLY_SPEED : WALK_SPEED) * turn * slow * wobble);
             }
         }
 
-        // aceleração suave (ease-in / ease-out)
         cmdVel = cmdVel.add(desired.subtract(cmdVel).multiply(0.18));
         if (cmdVel.lengthSquared() < 1.0E-5) cmdVel = Vec3d.ZERO;
 
@@ -480,8 +493,7 @@ public class FarmBot {
                 p.getAbilities().flying = false;
                 p.sendAbilitiesUpdate();
             }
-            double cur = p.getVelocity().y;
-            p.setVelocity(cmdVel.x, cur, cmdVel.z);
+            p.setVelocity(cmdVel.x, p.getVelocity().y, cmdVel.z);
             double hSq = cmdVel.x * cmdVel.x + cmdVel.z * cmdVel.z;
             if (p.horizontalCollision && p.isOnGround() && hSq > 0.0016) {
                 p.setVelocity(cmdVel.x, 0.42, cmdVel.z); // pulo
@@ -506,7 +518,7 @@ public class FarmBot {
         return dx * dx + dz * dz < 0.64;
     }
 
-    /** Escolhe o próximo alvo: aleatório, mas favorecendo os mais próximos (menos zigue-zague). */
+    /** Próximo alvo: aleatório, mas favorecendo os mais próximos (corrida contínua, sem zigue-zague). */
     private static void pickTarget(ClientPlayerEntity p, boolean fly) {
         targetAge = 0;
         targetBlock = null;
@@ -531,6 +543,8 @@ public class FarmBot {
             int idx = (int) (Math.pow(RNG.nextDouble(), 1.6) * k);
             BlockPos c = candidates.get(Math.min(idx, candidates.size() - 1));
             targetBlock = c;
+            aimOffset = new Vec3d((RNG.nextDouble() - 0.5) * 0.4,
+                    (RNG.nextDouble() - 0.5) * 0.2, (RNG.nextDouble() - 0.5) * 0.4);
             double y = (fly && !mine) ? c.getY() + 1.0 : c.getY();
             target = new Vec3d(c.getX() + 0.5, y, c.getZ() + 0.5);
             return;
@@ -546,39 +560,35 @@ public class FarmBot {
 
     // ------------------------------------------------------------------
     // Câmera suave
-    private static void setGaze(Vec3d g) {
-        if (gazeTicks <= 0) { gaze = g; gazeTicks = 8; }
-    }
-
     private static float yawOf(double dx, double dz) {
         return (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
     }
 
     private static void updateLook(ClientPlayerEntity p) {
         float ty, tp;
-        if (gaze != null && gazeTicks > 0) {
-            gazeTicks--;
+        if (aimPoint != null) {
             Vec3d e = p.getEyePos();
-            double dx = gaze.x - e.x, dy = gaze.y - e.y, dz = gaze.z - e.z;
+            double dx = aimPoint.x - e.x, dy = aimPoint.y - e.y, dz = aimPoint.z - e.z;
             double h = Math.sqrt(dx * dx + dz * dz);
             ty = yawOf(dx, dz);
             tp = (float) -Math.toDegrees(Math.atan2(dy, h));
-        } else if (cmdVel.x * cmdVel.x + cmdVel.z * cmdVel.z > 0.0009) {
-            ty = yawOf(cmdVel.x, cmdVel.z) + (float) (Math.sin(tickCounter * 0.05) * 1.5);
-            tp = 14f + (float) (Math.sin(tickCounter * 0.07) * 2.0);
+        } else if (target != null && idleTicks <= 0) {
+            ty = yawOf(target.x - p.getX(), target.z - p.getZ())
+                    + (float) (Math.sin(tickCounter * 0.05) * 1.5);
+            tp = 18f + (float) (Math.sin(tickCounter * 0.07) * 2.0);
         } else {
             return;
         }
-        smoothLook(p, ty, tp, 9f, 5f);
+        smoothLook(p, ty, tp, 16f, 10f);
     }
 
-    /** Gira a câmera em direção ao alvo com easing e limite de velocidade por tick. */
+    /** Gira a câmera com easing e limite de velocidade por tick (sem viradas bruscas). */
     private static void smoothLook(ClientPlayerEntity p, float targetYaw, float targetPitch,
                                    float maxYawStep, float maxPitchStep) {
         float dy = MathHelper.wrapDegrees(targetYaw - p.getYaw());
         float dp = targetPitch - p.getPitch();
-        float stepY = MathHelper.clamp(dy * 0.22f, -maxYawStep, maxYawStep);
-        float stepP = MathHelper.clamp(dp * 0.22f, -maxPitchStep, maxPitchStep);
+        float stepY = MathHelper.clamp(dy * 0.28f, -maxYawStep, maxYawStep);
+        float stepP = MathHelper.clamp(dp * 0.28f, -maxPitchStep, maxPitchStep);
         p.setYaw(p.getYaw() + stepY);
         p.setPitch(MathHelper.clamp(p.getPitch() + stepP, -90f, 90f));
     }
