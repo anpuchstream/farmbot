@@ -8,34 +8,47 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.BlockPos;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /** Interface do mod (tecla G). */
 public class FarmScreen extends Screen {
-    private static final int SLOTS = 8; // plantações visíveis por página (2 colunas x 4 linhas)
-    private static int cropPage = 0;    // lembra a página enquanto o jogo está aberto
+    private static final int SLOTS = 8; // plantas visíveis por página (2 colunas x 4 linhas)
+    private static Crop.Category category = Crop.Category.CROPS;
+    private static int cropPage = 0;
 
     private final TextFieldWidget[] fields = new TextFieldWidget[6];
     private final ButtonWidget[] cropSlots = new ButtonWidget[SLOTS];
     private ButtonWidget taskBtn, moveBtn, replantBtn, mineModeBtn, startBtn;
-    private ButtonWidget prevBtn, nextBtn, allBtn, clearBtn;
+    private ButtonWidget catBtn, prevBtn, nextBtn, allBtn, noneBtn;
 
-    private final int pageCount = (int) Math.ceil(Crop.values().length / (double) SLOTS);
-    private int labelCropsY, labelAreaY, pos1Y, pos2Y, statusY;
+    private int labelAreaY, pos1Y, pos2Y, statusY;
 
     public FarmScreen() {
         super(Text.literal("Farm Bot"));
     }
 
+    private List<Crop> list() {
+        List<Crop> l = new ArrayList<>();
+        for (Crop c : Crop.values()) if (c.category == category) l.add(c);
+        return l;
+    }
+
+    private int pageCount() {
+        return Math.max(1, (int) Math.ceil(list().size() / (double) SLOTS));
+    }
+
     private Crop cropAt(int slot) {
+        List<Crop> l = list();
         int idx = cropPage * SLOTS + slot;
-        Crop[] all = Crop.values();
-        return idx < all.length ? all[idx] : null;
+        return idx < l.size() ? l.get(idx) : null;
     }
 
     @Override
     protected void init() {
         int cx = width / 2;
         int left = cx - 155;
-        if (cropPage >= pageCount) cropPage = 0;
+        if (cropPage >= pageCount()) cropPage = 0;
 
         // Linha 1: tarefa + movimento
         taskBtn = addDrawableChild(ButtonWidget.builder(taskText(), b -> {
@@ -62,26 +75,31 @@ public class FarmScreen extends Screen {
             refreshWidgets();
         }).dimensions(left + 160, 42, 150, 20).build());
 
-        // Linha do seletor de plantações: página anterior/próxima, todas, limpar
-        labelCropsY = 67;
+        // Linha do seletor: categoria, páginas, marcar/desmarcar categoria
+        catBtn = addDrawableChild(ButtonWidget.builder(Text.empty(), b -> {
+            Crop.Category[] v = Crop.Category.values();
+            category = v[(category.ordinal() + 1) % v.length];
+            cropPage = 0;
+            refreshWidgets();
+        }).dimensions(left, 63, 150, 14).build());
         prevBtn = addDrawableChild(ButtonWidget.builder(Text.literal("<"), b -> {
-            cropPage = (cropPage - 1 + pageCount) % pageCount;
+            cropPage = (cropPage - 1 + pageCount()) % pageCount();
             refreshWidgets();
-        }).dimensions(left + 152, 64, 20, 13).build());
+        }).dimensions(left + 154, 63, 18, 14).build());
         nextBtn = addDrawableChild(ButtonWidget.builder(Text.literal(">"), b -> {
-            cropPage = (cropPage + 1) % pageCount;
+            cropPage = (cropPage + 1) % pageCount();
             refreshWidgets();
-        }).dimensions(left + 174, 64, 20, 13).build());
+        }).dimensions(left + 174, 63, 18, 14).build());
         allBtn = addDrawableChild(ButtonWidget.builder(Text.literal("Todas"), b -> {
-            for (Crop c : Crop.values()) FarmConfig.crops.add(c);
+            FarmConfig.crops.addAll(list());
             refreshWidgets();
-        }).dimensions(left + 198, 64, 54, 13).build());
-        clearBtn = addDrawableChild(ButtonWidget.builder(Text.literal("Limpar"), b -> {
-            FarmConfig.crops.clear();
+        }).dimensions(left + 196, 63, 56, 14).build());
+        noneBtn = addDrawableChild(ButtonWidget.builder(Text.literal("Nenhuma"), b -> {
+            FarmConfig.crops.removeAll(list());
             refreshWidgets();
-        }).dimensions(left + 256, 64, 54, 13).build());
+        }).dimensions(left + 256, 63, 54, 14).build());
 
-        // Grade de plantações (8 por página)
+        // Grade de plantas (8 por página)
         for (int i = 0; i < SLOTS; i++) {
             final int slot = i;
             int bx = left + (i % 2) * 160;
@@ -152,10 +170,13 @@ public class FarmScreen extends Screen {
         replantBtn.active = farm;
         mineModeBtn.active = !farm;
 
+        catBtn.setMessage(Text.literal("Tipo: " + category.label
+                + " (" + (cropPage + 1) + "/" + pageCount() + ")"));
+        catBtn.active = farm;
         prevBtn.active = farm;
         nextBtn.active = farm;
         allBtn.active = farm;
-        clearBtn.active = farm;
+        noneBtn.active = farm;
 
         for (int i = 0; i < SLOTS; i++) {
             Crop c = cropAt(i);
@@ -209,9 +230,6 @@ public class FarmScreen extends Screen {
         boolean farm = FarmConfig.task == FarmConfig.Task.FARM;
 
         ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Farm Bot"), cx, 7, 0xFFFFFF);
-        ctx.drawTextWithShadow(textRenderer,
-                Text.literal(farm ? "Plantas — pág. " + (cropPage + 1) + "/" + pageCount : "Plantas (inativo)"),
-                left, labelCropsY, 0xAAAAAA);
         ctx.drawTextWithShadow(textRenderer, Text.literal("Área (X Y Z dos dois cantos):"), left, labelAreaY, 0xAAAAAA);
         ctx.drawTextWithShadow(textRenderer, Text.literal("Canto 1"), left, pos1Y + 5, 0xFFFFFF);
         ctx.drawTextWithShadow(textRenderer, Text.literal("Canto 2"), left, pos2Y + 5, 0xFFFFFF);
