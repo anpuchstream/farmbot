@@ -607,6 +607,7 @@ public class FarmScreen extends Screen {
                 gx, gy + 112, 0xFF88FF88);
         text(c, "Modo EC: cubra a zona plana inteira (Y = camada do chão).", gx, gy + 128, C_MUTED);
         text(c, "Modo PR: cubra o poço inteiro, do topo (Y alto) ao fundo (Y baixo).", gx, gy + 140, C_MUTED);
+        text(c, "O EC aceita blocos até 2 abaixo do Y mínimo (pode marcar voando logo acima do chão).", gx, gy + 152, C_MUTED);
     }
 
     // ---------------------------------------------------------------- rodapé
