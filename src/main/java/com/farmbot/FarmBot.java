@@ -49,8 +49,8 @@ public class FarmBot {
     /** Tolerância vertical do farm: aceita plantas alguns blocos acima/abaixo da área. */
     private static final int V_TOL = 2;
     private static final int MAX_VOLUME_FARM = 250_000;
-    private static final int MAX_VOLUME_MINE = 100_000;
-    private static final int MINE_SAMPLE = 200;
+    /** Mineração varre por fatias, então o limite é em colunas (X*Z), não em volume. */
+    private static final long MAX_COLUMNS_MINE = 4_000_000L;
     private static final double WALK_SPEED = 0.25; // blocos por tick (~5 blocos/s, corrida)
     private static final double FLY_SPEED = 0.32;
 
@@ -92,9 +92,16 @@ public class FarmBot {
         boolean mining = FarmConfig.task == FarmConfig.Task.MINE;
         if (!FarmConfig.areaSet) { msg(mc, "§cDefina a área primeiro (tecla G)."); return; }
         if (!mining && FarmConfig.crops.isEmpty()) { msg(mc, "§cEscolha ao menos uma planta."); return; }
-        long max = mining ? MAX_VOLUME_MINE : MAX_VOLUME_FARM;
-        if (FarmConfig.volume() > max) {
-            msg(mc, "§cÁrea grande demais (" + FarmConfig.volume() + " blocos, máx " + max + ").");
+        if (mining && !mc.player.getAbilities().allowFlying) {
+            msg(mc, "§cA mineração (EC/PR) funciona voando, e você não pode voar aqui.");
+            return;
+        }
+        if (!mining && FarmConfig.volume() > MAX_VOLUME_FARM) {
+            msg(mc, "§cÁrea grande demais (" + FarmConfig.volume() + " blocos, máx " + MAX_VOLUME_FARM + ").");
+            return;
+        }
+        if (mining && columns() > MAX_COLUMNS_MINE) {
+            msg(mc, "§cÁrea grande demais (" + columns() + " colunas X*Z, máx " + MAX_COLUMNS_MINE + ").");
             return;
         }
         ready.clear();
@@ -103,6 +110,8 @@ public class FarmBot {
         badTargets.clear();
         mineCount = 0;
         currentMine = null;
+        slabTop = FarmConfig.maxY();
+        mineEmptyTicks = 0;
         target = null; targetBlock = null; lastCheckPos = null; aimPoint = null;
         cmdVel = Vec3d.ZERO;
         idleTicks = 0;
@@ -112,7 +121,7 @@ public class FarmBot {
         HumanLook.reset();
         armGuard(mc);
         FarmConfig.enabled = true;
-        msg(mc, mining ? "§aMineração LIGADA" : "§aFarm LIGADO");
+        msg(mc, mining ? "§aMineração " + FarmConfig.mineZone + " LIGADA" : "§aFarm LIGADO");
     }
 
     public static void stop(MinecraftClient mc, String message) {
@@ -151,8 +160,14 @@ public class FarmBot {
     }
 
     private static void alert() {
+        if (!FarmConfig.alertSound) return;
         alertLeft = ALERT_REPEATS;
         alertDelay = 0;
+    }
+
+    /** Toca um toque do alerta (botão de teste do menu). */
+    public static void testAlert(MinecraftClient mc) {
+        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_BELL_USE, 1.0f, 1.0f));
     }
 
     /** Toca os toques pendentes do alerta. Roda todo tick, mesmo com o bot desligado. */
@@ -221,7 +236,7 @@ public class FarmBot {
         }
 
         // Antes do check de tela: teleporte/troca de mundo abrem a tela de carregamento.
-        if (!safetyGuard(mc, p)) return;
+        if (FarmConfig.guardEnabled && !safetyGuard(mc, p)) return;
 
         if (mc.currentScreen != null) {
             cmdVel = Vec3d.ZERO;
@@ -235,13 +250,23 @@ public class FarmBot {
         boolean mining = FarmConfig.task == FarmConfig.Task.MINE;
         aimPoint = null;
 
+        if (mining && !p.getAbilities().allowFlying) {
+            stop(mc, "§cMineração parada: você perdeu a permissão de voar.");
+            return;
+        }
+
         if (--scanTimer <= 0) {
             if (mining) {
-                scanMine(mc);
-                scanTimer = 100;
+                scanTimer = scanMine(mc, p);
                 if (mineCount == 0 && currentMine == null) {
-                    stop(mc, "§aMineração concluída: nada mais para minerar na área.");
-                    return;
+                    // mina vazia: espera regenerar (minas de servidor resetam) antes de desistir
+                    mineEmptyTicks += scanTimer;
+                    if (mineEmptyTicks >= MINE_REGEN_WAIT) {
+                        stop(mc, "§aMineração concluída: nada novo para minerar há 5 minutos.");
+                        return;
+                    }
+                } else {
+                    mineEmptyTicks = 0;
                 }
             } else {
                 scanFarm(mc);
@@ -274,7 +299,14 @@ public class FarmBot {
 
     private static void reportStatus(MinecraftClient mc) {
         if (FarmConfig.task == FarmConfig.Task.MINE) {
-            msg(mc, "§bAlvos: " + Math.max(mineCount, 0));
+            String zone = "[" + FarmConfig.mineZone + "] ";
+            if (mineCount == 0 && currentMine == null) {
+                msg(mc, "§e" + zone + "Aguardando a mina regenerar...");
+            } else if (isPR()) {
+                msg(mc, "§b" + zone + mineLayerInfo() + " | Alvos: " + mineCount);
+            } else {
+                msg(mc, "§b" + zone + "Alvos: " + mineCount);
+            }
         } else if (ready.isEmpty() && replantQueue.isEmpty()) {
             msg(mc, "§eNenhuma planta pronta na área (Y " + (FarmConfig.minY() - V_TOL)
                     + " a " + (FarmConfig.maxY() + V_TOL) + "). Confira as coordenadas.");
@@ -428,31 +460,104 @@ public class FarmBot {
         if (!s.getFluidState().isEmpty()) return false;
         if (s.hasBlockEntity()) return false;
         if (s.getHardness(w, pos) < 0) return false;
-        if (FarmConfig.mineMode == FarmConfig.MineMode.ORES && !isOre(s)) return false;
+        if (FarmConfig.oresOnly() && !isOre(s)) return false;
         for (Direction d : Direction.values()) {
             if (!w.getFluidState(pos.offset(d)).isEmpty()) return false;
         }
         return true;
     }
 
-    private static void scanMine(MinecraftClient mc) {
+    // ------------------------------------------------------------------
+    //  Fatias de mineração. EC = a área inteira (zona plana).
+    //  PR = uma fatia de SLAB_DEPTH camadas que desce do topo ao fundo (zona funda).
+    // ------------------------------------------------------------------
+    private static final int SLAB_DEPTH = 2;          // camadas por fatia no modo PR (alcance real do braço ~3 blocos)
+    private static final int MINE_WINDOW = 40;        // raio (blocos) da varredura local em volta do jogador
+    private static final int MINE_NEAR_K = 16;        // quantos alvos próximos guardar
+    private static final int MINE_REGEN_WAIT = 6000;  // ticks (~5 min) esperando a mina regenerar antes de parar
+    private static int slabTop;                        // PR: Y mais alto da fatia atual
+    private static int mineEmptyTicks;
+
+    private static boolean isPR() {
+        return FarmConfig.mineZone == FarmConfig.MineZone.PR;
+    }
+
+    private static long columns() {
+        return (long) (FarmConfig.maxX() - FarmConfig.minX() + 1) * (FarmConfig.maxZ() - FarmConfig.minZ() + 1);
+    }
+
+    private static int slabTopY() {
+        return isPR() ? Math.min(slabTop, FarmConfig.maxY()) : FarmConfig.maxY();
+    }
+
+    private static int slabBottomY() {
+        return isPR() ? Math.max(slabTopY() - SLAB_DEPTH + 1, FarmConfig.minY()) : FarmConfig.minY();
+    }
+
+    /** Texto da camada atual (modo PR) para o menu e o status. */
+    public static String mineLayerInfo() {
+        if (FarmConfig.task != FarmConfig.Task.MINE || !isPR()) return "";
+        return "Camada Y " + slabTopY() + " a " + slabBottomY();
+    }
+
+    /**
+     * Procura alvos na fatia atual: primeiro numa janela em volta do jogador (barato) e, se estiver
+     * vazia, na fatia inteira. No modo PR, fatia limpa = desce para a próxima.
+     *
+     * @return em quantos ticks escanear de novo
+     */
+    private static int scanMine(MinecraftClient mc, ClientPlayerEntity p) {
+        int px = p.getBlockPos().getX(), pz = p.getBlockPos().getZ();
+        boolean global = false;
+        for (int guard = 0; guard < 12; guard++) {
+            int yLo = slabBottomY(), yHi = slabTopY();
+            scanSlab(mc, p, Math.max(FarmConfig.minX(), px - MINE_WINDOW), Math.min(FarmConfig.maxX(), px + MINE_WINDOW),
+                    Math.max(FarmConfig.minZ(), pz - MINE_WINDOW), Math.min(FarmConfig.maxZ(), pz + MINE_WINDOW), yLo, yHi);
+            if (mineCount == 0) {
+                scanSlab(mc, p, FarmConfig.minX(), FarmConfig.maxX(), FarmConfig.minZ(), FarmConfig.maxZ(), yLo, yHi);
+                global = true;
+            }
+            if (mineCount > 0 || !isPR()) break;
+            if (yLo <= FarmConfig.minY()) {          // chegou ao fundo: recomeça do topo (a mina pode ter regenerado)
+                slabTop = FarmConfig.maxY();
+                break;
+            }
+            slabTop = yLo - 1;                        // fatia limpa: desce
+        }
+        if (!global) return 40;
+        long cells = columns() * Math.max(1, slabTopY() - slabBottomY() + 1);
+        return (int) Math.max(40, Math.min(400, cells / 5000));
+    }
+
+    /** Conta os blocos quebráveis e expostos da região e guarda os MINE_NEAR_K mais bem posicionados. */
+    private static void scanSlab(MinecraftClient mc, ClientPlayerEntity p, int x0, int x1, int z0, int z1, int yLo, int yHi) {
         mineCandidates.clear();
         mineCount = 0;
+        final double px = p.getX(), pz = p.getZ();
+        final double[] keys = new double[MINE_NEAR_K];
         BlockPos.Mutable m = new BlockPos.Mutable();
-        boolean oresOnly = FarmConfig.mineMode == FarmConfig.MineMode.ORES;
-        for (int x = FarmConfig.minX(); x <= FarmConfig.maxX(); x++)
-            for (int y = FarmConfig.minY(); y <= FarmConfig.maxY(); y++)
-                for (int z = FarmConfig.minZ(); z <= FarmConfig.maxZ(); z++) {
+        for (int x = x0; x <= x1; x++)
+            for (int z = z0; z <= z1; z++)
+                for (int y = yHi; y >= yLo; y--) {
                     m.set(x, y, z);
                     if (!isMinable(mc.world, m)) continue;
-                    if (oresOnly && !isExposed(mc.world, m)) continue;
+                    if (!isExposed(mc.world, m)) continue;
                     mineCount++;
-                    if (mineCandidates.size() < MINE_SAMPLE) {
-                        mineCandidates.add(m.toImmutable());
-                    } else {
-                        int j = RNG.nextInt(mineCount);
-                        if (j < MINE_SAMPLE) mineCandidates.set(j, m.toImmutable());
+                    double dx = x + 0.5 - px, dz = z + 0.5 - pz, dy = yHi - y;
+                    double key = dx * dx + dz * dz + 9.0 * dy * dy;   // perto primeiro; camada de cima primeiro
+                    int n = mineCandidates.size();
+                    if (n == MINE_NEAR_K) {
+                        if (key >= keys[n - 1]) continue;
+                        mineCandidates.remove(n - 1);
+                        n--;
                     }
+                    int i = n;
+                    while (i > 0 && keys[i - 1] > key) {
+                        keys[i] = keys[i - 1];
+                        i--;
+                    }
+                    keys[i] = key;
+                    mineCandidates.add(i, m.toImmutable());
                 }
     }
 
@@ -481,10 +586,12 @@ public class FarmBot {
     /** Escolhe um bloco visível ao alcance, mira nele e só quebra quando a mira está sobre ele. */
     private static boolean tryMine(MinecraftClient mc, ClientPlayerEntity p) {
         BlockHitResult hit = null;
+        final int yFloor = slabBottomY();   // PR: de cima para baixo, nunca abaixo da fatia atual
 
         if (currentMine != null) {
             BlockState cs = mc.world.getBlockState(currentMine);
             boolean ok = FarmConfig.inArea(currentMine.getX(), currentMine.getY(), currentMine.getZ())
+                    && currentMine.getY() >= yFloor
                     && p.getEyePos().squaredDistanceTo(Vec3d.ofCenter(currentMine)) <= REACH * REACH
                     && isMinable(mc.world, currentMine)
                     && playerAllows(mc, p, currentMine, cs);
@@ -502,6 +609,7 @@ public class FarmBot {
                     for (int dz = -r; dz <= r; dz++) {
                         BlockPos pos = base.add(dx, dy, dz);
                         if (!FarmConfig.inArea(pos.getX(), pos.getY(), pos.getZ())) continue;
+                        if (pos.getY() < yFloor) continue;
                         if (eye.squaredDistanceTo(Vec3d.ofCenter(pos)) > REACH * REACH) continue;
                         if (!isMinable(mc.world, pos)) continue;
                         if (!isExposed(mc.world, pos)) continue;
@@ -509,7 +617,13 @@ public class FarmBot {
                         cands.add(pos);
                     }
             if (cands.isEmpty()) return false;
-            cands.sort(Comparator.comparingDouble(b -> eye.squaredDistanceTo(Vec3d.ofCenter(b))));
+            final double yRef = slabTopY() + 0.5;
+            cands.sort(Comparator.comparingDouble(b -> {
+                double s = Math.sqrt(eye.squaredDistanceTo(Vec3d.ofCenter(b)));
+                s += 0.5 * Math.max(0.0, yRef - (b.getY() + 0.5));      // prefere as camadas de cima
+                if (isOre(mc.world.getBlockState(b))) s -= 1.5;          // minérios primeiro
+                return s;
+            }));
 
             int tries = 0;
             for (BlockPos c : cands) {
@@ -581,6 +695,10 @@ public class FarmBot {
                 || (targetBlock != null && !targetStillValid(mc));
         if (needNew) {
             if (target != null && targetBlock != null && targetAge > 300) badTargets.add(targetBlock);
+            if (!farm && target != null && targetBlock != null && reached(p, fly)
+                    && !mc.world.getBlockState(targetBlock).isAir()) {
+                badTargets.add(targetBlock);   // chegou e o bloco continua aí (não dá para quebrar dali): tenta outro
+            }
             pickTarget(p, fly);
         }
 
@@ -640,6 +758,8 @@ public class FarmBot {
 
     /** Voar só se o jogador escolheu voar E pode voar (criativo). */
     private static boolean wantsFly(MinecraftClient mc, ClientPlayerEntity p) {
+        // mineração (EC e PR) sempre voa, independente do modo de movimento do farm
+        if (FarmConfig.task == FarmConfig.Task.MINE) return p.getAbilities().allowFlying;
         if (FarmConfig.mode != FarmConfig.Mode.FLY) return false;
         if (p.getAbilities().allowFlying) return true;
         if (!warnedFly) {
@@ -850,6 +970,23 @@ public class FarmBot {
         return best;
     }
 
+    /** Mineração: vai até o bloco restante mais próximo (preferindo as camadas de cima). */
+    private static BlockPos pickMineTarget(ClientPlayerEntity p, List<BlockPos> cands) {
+        double px = p.getX(), pz = p.getZ();
+        int top = slabTopY();
+        BlockPos best = null;
+        double bestKey = Double.MAX_VALUE;
+        for (BlockPos b : cands) {
+            double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
+            double h2 = dx * dx + dz * dz;
+            if (h2 < 4.0) continue;   // já está colado: o tryMine cuida (ou não dá para quebrar dali)
+            double dy = top - b.getY();
+            double key = h2 + 9.0 * dy * dy;
+            if (key < bestKey) { bestKey = key; best = b; }
+        }
+        return best;
+    }
+
     /** Escolha usada na mineração: aleatória, favorecendo os mais próximos. */
     private static BlockPos pickNearRandom(ClientPlayerEntity p, List<BlockPos> candidates) {
         final double px = p.getX(), pz = p.getZ();
@@ -895,13 +1032,26 @@ public class FarmBot {
         candidates.removeIf(badTargets::contains);
 
         if (!candidates.isEmpty()) {
-            BlockPos c = mine ? pickNearRandom(p, candidates) : pickAhead(p, candidates);
-            targetBlock = c;
-            aimOffset = new Vec3d((RNG.nextDouble() - 0.5) * 0.4,
-                    (RNG.nextDouble() - 0.5) * 0.2, (RNG.nextDouble() - 0.5) * 0.4);
-            double y = (fly && !mine) ? c.getY() + 1.0 : c.getY();
-            target = new Vec3d(c.getX() + 0.5, y, c.getZ() + 0.5);
-            return;
+            BlockPos c = mine ? pickMineTarget(p, candidates) : pickAhead(p, candidates);
+            if (c != null) {
+                targetBlock = c;
+                aimOffset = new Vec3d((RNG.nextDouble() - 0.5) * 0.4,
+                        (RNG.nextDouble() - 0.5) * 0.2, (RNG.nextDouble() - 0.5) * 0.4);
+                double y;
+                if (mine) y = fly ? slabTopY() + 1.0 : c.getY();   // voando: pairar logo acima da fatia
+                else y = fly ? c.getY() + 1.0 : c.getY();
+                target = new Vec3d(c.getX() + 0.5, y, c.getZ() + 0.5);
+                return;
+            }
+            if (mine) {
+                // só restam blocos colados no jogador que não dá para quebrar daqui (ex.: o chão sob o pé):
+                // dá um passo de lado para quebrá-los de outro ponto
+                double ang = RNG.nextDouble() * Math.PI * 2.0;
+                double tx = MathHelper.clamp(p.getX() + Math.cos(ang) * 4.0, FarmConfig.minX() + 0.5, FarmConfig.maxX() + 0.5);
+                double tz = MathHelper.clamp(p.getZ() + Math.sin(ang) * 4.0, FarmConfig.minZ() + 0.5, FarmConfig.maxZ() + 0.5);
+                target = new Vec3d(tx, fly ? slabTopY() + 1.0 : p.getY(), tz);
+                return;
+            }
         }
 
         // nada para fazer: passeia pela área e às vezes para um pouco

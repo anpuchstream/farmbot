@@ -16,18 +16,33 @@ public class FarmConfig {
     public enum Mode { WALK, FLY }
     /** Tarefa do bot: colher plantações ou minerar. */
     public enum Task { FARM, MINE }
-    /** ORES = só minérios expostos; ALL = esvazia a área inteira. */
-    public enum MineMode { ORES, ALL }
+    /**
+     * Tipo de zona de mineração.
+     * EC = totalmente plana (varre a área inteira e espera a mina regenerar).
+     * PR = plana no topo, mas muito funda e com vários minérios (escava de cima para baixo, em fatias).
+     */
+    public enum MineZone { EC, PR }
 
     public static boolean enabled = false;
     public static Task task = Task.FARM;
     public static Mode mode = Mode.WALK;
-    public static MineMode mineMode = MineMode.ORES;
+    public static MineZone mineZone = MineZone.EC;
+    /** true = quebra só minérios expostos; false = quebra tudo (esvazia a zona). Um valor por zona. */
+    public static boolean oresOnlyEC = false;
+    public static boolean oresOnlyPR = false;
+    /** Proteção (reinício/teleporte/saída da área) e som de alerta. */
+    public static boolean guardEnabled = true;
+    public static boolean alertSound = true;
     public static boolean replant = true;
     public static boolean areaSet = false;
     public static final int[] p1 = {0, 64, 0};
     public static final int[] p2 = {0, 64, 0};
     public static final Set<Crop> crops = EnumSet.of(Crop.WHEAT);
+
+    /** "Só minérios" da zona de mineração escolhida. */
+    public static boolean oresOnly() {
+        return mineZone == MineZone.PR ? oresOnlyPR : oresOnlyEC;
+    }
 
     public static int minX() { return Math.min(p1[0], p2[0]); }
     public static int maxX() { return Math.max(p1[0], p2[0]); }
@@ -49,8 +64,10 @@ public class FarmConfig {
 
     private static class Data {
         int[] p1, p2;
-        String mode, task, mineMode;
+        String mode, task, mineZone;
         boolean replant, areaSet;
+        // Boolean (objeto) para distinguir "ausente" de "false" em configs antigas
+        Boolean oresOnlyEC, oresOnlyPR, guardEnabled, alertSound;
         List<String> crops;
     }
 
@@ -65,7 +82,11 @@ public class FarmConfig {
             d.p2 = p2.clone();
             d.mode = mode.name();
             d.task = task.name();
-            d.mineMode = mineMode.name();
+            d.mineZone = mineZone.name();
+            d.oresOnlyEC = oresOnlyEC;
+            d.oresOnlyPR = oresOnlyPR;
+            d.guardEnabled = guardEnabled;
+            d.alertSound = alertSound;
             d.replant = replant;
             d.areaSet = areaSet;
             d.crops = new ArrayList<>();
@@ -86,7 +107,13 @@ public class FarmConfig {
             if (d.p2 != null && d.p2.length == 3) System.arraycopy(d.p2, 0, p2, 0, 3);
             if (d.mode != null) mode = Mode.valueOf(d.mode);
             if (d.task != null) task = Task.valueOf(d.task);
-            if (d.mineMode != null) mineMode = MineMode.valueOf(d.mineMode);
+            if (d.mineZone != null) {
+                try { mineZone = MineZone.valueOf(d.mineZone); } catch (IllegalArgumentException ignored) { }
+            }
+            if (d.oresOnlyEC != null) oresOnlyEC = d.oresOnlyEC;
+            if (d.oresOnlyPR != null) oresOnlyPR = d.oresOnlyPR;
+            if (d.guardEnabled != null) guardEnabled = d.guardEnabled;
+            if (d.alertSound != null) alertSound = d.alertSound;
             replant = d.replant;
             areaSet = d.areaSet;
             if (d.crops != null) {

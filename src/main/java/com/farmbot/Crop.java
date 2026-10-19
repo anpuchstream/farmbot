@@ -140,6 +140,16 @@ public enum Crop {
         this(category, label, (Item) null, blocks);
     }
 
+    /** Item usado como ícone do card no menu. */
+    public Item icon() {
+        if (seed != null) return seed;
+        for (Block b : blocks) {
+            Item i = b.asItem();
+            if (i != Items.AIR) return i;
+        }
+        return Items.PAPER;
+    }
+
     /** Frutinhas doces são colhidas com botão direito (a moita continua viva). */
     public boolean usesRightClick() {
         return this == SWEET_BERRY;
