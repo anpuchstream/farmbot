@@ -26,6 +26,7 @@ import net.minecraft.world.World;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -53,8 +54,8 @@ public class FarmBot {
     private static final long MAX_COLUMNS_MINE = 4_000_000L;
     private static final double WALK_SPEED = 0.25; // blocos por tick (~5 blocos/s, corrida)
     private static final double FLY_SPEED = 0.32;
-    /** Voo da mineração (blocos/tick). 0.5 = ~10 blocos/s, perto do voo padrão do criativo. */
-    private static final double FLY_SPEED_MINE = 0.5;
+    /** Inclinação da câmera na mineração (graus para baixo): olha o chão logo à frente. */
+    private static final float MINE_PITCH = 58f;
     /** EC: aceita blocos até 2 abaixo do Y mínimo da área (quem marca os cantos em pé/voando fica acima do chão). */
     private static final int MINE_V_TOL = 2;
 
@@ -65,9 +66,10 @@ public class FarmBot {
     // --- mineração ---
     private static final List<BlockPos> mineCandidates = new ArrayList<>();
     private static int mineCount = 0;
-    private static BlockPos currentMine;
-    private static Vec3d mineAnchor;        // centro do último bloco quebrado (a mira continua por perto)
-    private static int lastForcedScan;
+    private static int mineTopY = Integer.MIN_VALUE;   // Y do bloco mais alto achado no último scan (altura do voo)
+    private static BlockPos slowPos;                    // bloco lento em quebra (detecta bloco protegido)
+    private static int slowTicks;
+    private static final Map<BlockPos, Integer> breakCount = new HashMap<>();   // quebras repetidas (servidor devolveu o bloco)
 
     // --- movimento / câmera ---
     private static BlockPos targetBlock;
@@ -115,11 +117,12 @@ public class FarmBot {
         mineCandidates.clear();
         badTargets.clear();
         mineCount = 0;
-        currentMine = null;
         slabTop = FarmConfig.maxY();
         mineEmptyTicks = 0;
-        mineAnchor = null;
-        lastForcedScan = 0;
+        mineTopY = Integer.MIN_VALUE;
+        slowPos = null;
+        slowTicks = 0;
+        breakCount.clear();
         target = null; targetBlock = null; lastCheckPos = null; aimPoint = null;
         cmdVel = Vec3d.ZERO;
         idleTicks = 0;
@@ -254,7 +257,7 @@ public class FarmBot {
         }
 
         tickCounter++;
-        if (tickCounter % 600 == 0) badTargets.clear();
+        if (tickCounter % 600 == 0) { badTargets.clear(); breakCount.clear(); }
         boolean mining = FarmConfig.task == FarmConfig.Task.MINE;
         aimPoint = null;
 
@@ -266,7 +269,7 @@ public class FarmBot {
         if (--scanTimer <= 0) {
             if (mining) {
                 scanTimer = scanMine(mc, p);
-                if (mineCount == 0 && currentMine == null) {
+                if (mineCount == 0) {
                     // mina vazia: espera regenerar (minas de servidor resetam) antes de desistir
                     mineEmptyTicks += scanTimer;
                     if (mineEmptyTicks >= MINE_REGEN_WAIT) {
@@ -285,9 +288,10 @@ public class FarmBot {
         if (++statusTimer >= 40) { statusTimer = 0; reportStatus(mc); }
 
         if (mining) {
-            boolean hold = tryMine(mc, p);   // true só ao quebrar bloco lento; senão voa direto
-            move(mc, p, hold);
-            updateLook(p);
+            boolean holdForBreak = breakingSlow;   // veio do tick anterior
+            breakingSlow = false;
+            runMine(mc, p, holdForBreak);          // voo (W + sprint) com a câmera olhando para baixo
+            mineAct(mc, p);                        // quebra o que estiver sob a mira, TODO tick
         } else {
             boolean holdForBreak = breakingSlow;   // veio do tick anterior
             breakingSlow = false;
@@ -307,7 +311,7 @@ public class FarmBot {
     private static void reportStatus(MinecraftClient mc) {
         if (FarmConfig.task == FarmConfig.Task.MINE) {
             String zone = "[" + FarmConfig.mineZone + "] ";
-            if (mineCount == 0 && currentMine == null) {
+            if (mineCount == 0) {
                 String hint = "";
                 if (mc.player != null) {
                     int fy = floorYUnder(mc, mc.player);
@@ -569,6 +573,7 @@ public class FarmBot {
     private static void scanSlab(MinecraftClient mc, ClientPlayerEntity p, int x0, int x1, int z0, int z1, int yLo, int yHi) {
         mineCandidates.clear();
         mineCount = 0;
+        int topY = Integer.MIN_VALUE;
         final double px = p.getX(), pz = p.getZ();
         final double[] keys = new double[MINE_NEAR_K];
         BlockPos.Mutable m = new BlockPos.Mutable();
@@ -580,6 +585,7 @@ public class FarmBot {
                     if (badTargets.contains(m)) continue;   // já tentei e não deu para quebrar: ignora por um tempo
                     if (!isExposed(mc.world, m)) continue;
                     mineCount++;
+                    if (y > topY) topY = y;
                     double dx = x + 0.5 - px, dz = z + 0.5 - pz, dy = yHi - y;
                     double key = dx * dx + dz * dz + 9.0 * dy * dy;   // perto primeiro; camada de cima primeiro
                     int n = mineCandidates.size();
@@ -596,6 +602,7 @@ public class FarmBot {
                     keys[i] = key;
                     mineCandidates.add(i, m.toImmutable());
                 }
+        if (mineCount > 0) mineTopY = topY;
     }
 
     private static BlockHitResult rayTo(MinecraftClient mc, ClientPlayerEntity p, BlockPos pos) {
@@ -620,89 +627,193 @@ public class FarmBot {
         return true;
     }
 
+    // ------------------------------------------------------------------
+    //  MINERAÇÃO VOANDO, no estilo do farm: escolhe um rumo, voa com W + sprint, a câmera acompanha o
+    //  rumo olhando para baixo e o bot quebra o bloco que estiver sob a mira, a cada tick.
+    // ------------------------------------------------------------------
+
+    /** Y (índice do bloco) da superfície que está sendo minerada. */
+    private static int mineSurfaceY() {
+        if (isPR()) return slabTopY();
+        return (mineCount > 0 && mineTopY != Integer.MIN_VALUE) ? mineTopY : FarmConfig.maxY();
+    }
+
+    /** Altura (dos pés) do voo: logo acima da superfície, para a mira cair no chão a ~1 bloco à frente. */
+    private static double mineHoverY() {
+        return mineSurfaceY() + 1.3;
+    }
+
+    /** Quantos blocos quebráveis há na superfície ao longo deste rumo (até 14 blocos à frente). */
+    private static int minableAlong(MinecraftClient mc, double px, double pz, float yaw) {
+        double fx = dirX(yaw), fz = dirZ(yaw);
+        int top = mineSurfaceY();
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        int n = 0;
+        for (int i = 1; i <= 14; i++) {
+            int bx = (int) Math.floor(px + fx * i), bz = (int) Math.floor(pz + fz * i);
+            for (int y = top; y >= top - 1; y--) {
+                if (!inMineArea(bx, y, bz) || y < slabBottomY()) continue;
+                m.set(bx, y, bz);
+                if (isMinable(mc.world, m)) { n++; break; }
+            }
+        }
+        return n;
+    }
+
     /**
-     * Mineração no estilo do farm: escolhe o próximo bloco para mirar (perto de onde a mira acabou de
-     * quebrar, para a câmera varrer o chão sem pular) e, TODO tick, quebra o que estiver sob a mira,
-     * como quem segura o botão de ataque. O movimento nunca para por causa da mira.
-     *
-     * @return true só se está quebrando um bloco lento (precisa segurar a posição até quebrar)
+     * Escolhe um novo rumo de voo, preferindo o que passa por mais blocos ainda não minerados
+     * e, quando o entorno já está limpo, o que vai em direção aos blocos que restam.
+     * mode 0 = troca normal; 1 = chegando na borda; 2 = travou em algo.
      */
-    private static boolean tryMine(MinecraftClient mc, ClientPlayerEntity p) {
-        final int yFloor = slabBottomY();   // PR: de cima para baixo, nunca abaixo da fatia atual
-        boolean hold = false;
+    private static void newMineHeading(MinecraftClient mc, ClientPlayerEntity p, int mode) {
+        final double px = p.getX(), pz = p.getZ();
+        double trig = wallTrigger();
+        float cur = heading;
+        float best = cur;
+        double bestScore = -1.0e9;
 
-        // 1) quebra o que está sob a mira
+        List<Float> options = new ArrayList<>();
+        int tries = mode == 0 ? 8 : 16;
+        for (int i = 0; i < tries; i++) {
+            float turn;
+            if (mode == 0) {
+                float mag = RNG.nextInt(100) < 70 ? 10f + RNG.nextFloat() * 35f : 60f + RNG.nextFloat() * 40f;
+                turn = mag * (RNG.nextBoolean() ? 1 : -1);
+            } else if (mode == 2) {
+                turn = (90f + RNG.nextFloat() * 90f) * (RNG.nextBoolean() ? 1 : -1);
+            } else {
+                turn = (RNG.nextFloat() * 2f - 1f) * 180f;
+            }
+            options.add(MathHelper.wrapDegrees(cur + turn));
+        }
+        // em direção aos blocos que ainda restam (os mais próximos do último scan)
+        List<BlockPos> near = new ArrayList<>(mineCandidates);
+        near.sort(Comparator.comparingDouble(b -> {
+            double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
+            return dx * dx + dz * dz;
+        }));
+        int added = 0;
+        for (BlockPos b : near) {
+            double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
+            if (dx * dx + dz * dz < 4.0) continue;
+            options.add(yawOf(dx, dz));
+            if (++added >= 3) break;
+        }
+
+        for (float yaw : options) {
+            if (freeDist(px, pz, yaw, EDGE_MARGIN) < trig + 1.0) continue;   // bate na borda
+            float turn = MathHelper.wrapDegrees(yaw - cur);
+            double score = minableAlong(mc, px, pz, yaw) + RNG.nextDouble() * 1.5 - Math.abs(turn) / 45.0;
+            if (score > bestScore) { bestScore = score; best = yaw; }
+        }
+        if (bestScore < -500) {   // nenhum rumo serve: vai em direção ao centro da área
+            double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
+            double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
+            best = yawOf(cx - px, cz - pz);
+        }
+        heading = best;
+        headingTicks = 20 + RNG.nextInt(21);   // reavalia a cada 1–2 s, seguindo o que sobrou
+    }
+
+    private static void runMine(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
+        if (!p.getAbilities().flying) {
+            p.getAbilities().flying = true;
+            p.sendAbilitiesUpdate();
+        }
+        final double px = p.getX(), pz = p.getZ();
+
+        // altitude: paira logo acima da superfície (controle proporcional da velocidade vertical)
+        Vec3d v = p.getVelocity();
+        p.setVelocity(v.x, MathHelper.clamp((mineHoverY() - p.getY()) * 0.35, -0.5, 0.5), v.z);
+
+        // mina vazia: paira olhando para baixo, esperando regenerar
+        if (mineCount == 0) {
+            mc.options.forwardKey.setPressed(false);
+            mc.options.sprintKey.setPressed(false);
+            keysHeld = true;
+            if (p.isSprinting()) p.setSprinting(false);
+            HumanLook.step(p, p.getYaw(), MINE_PITCH, false);
+            return;
+        }
+
+        // travou em algo (tentou avançar e quase não saiu do lugar): vira bastante
+        if (++stuckTimer >= 20) {
+            stuckTimer = 0;
+            if (lastCheckPos != null && forwardTicks >= 16
+                    && lastCheckPos.squaredDistanceTo(p.getPos()) < 0.25) {
+                newMineHeading(mc, p, 2);
+            }
+            lastCheckPos = p.getPos();
+            forwardTicks = 0;
+        }
+
+        // rumo: fora da área volta ao centro; chegando na borda escolhe outro; senão reavalia de tempos em tempos
+        if (!insideArea(px, pz, 0)) {
+            double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
+            double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
+            heading = yawOf(cx - px, cz - pz);
+            headingTicks = 30;
+        } else if (freeDist(px, pz, heading, EDGE_MARGIN) < wallTrigger()) {
+            newMineHeading(mc, p, 1);
+        } else if (--headingTicks <= 0) {
+            newMineHeading(mc, p, 0);
+        }
+
+        // voa para a frente, em sprint, só quando a câmera já está virada para o rumo
+        float yawErr = Math.abs(MathHelper.wrapDegrees(heading - p.getYaw()));
+        boolean forward = !holdForBreak && yawErr < 60f;
+        if (forward && freeDist(px, pz, p.getYaw(), 0.2) < 0.8 && insideArea(px, pz, 0.2)) {
+            forward = false;   // a câmera ainda aponta para a borda: termina de virar antes de voar
+        }
+        boolean sprint = forward && yawErr < 35f;
+
+        mc.options.forwardKey.setPressed(forward);
+        mc.options.jumpKey.setPressed(false);
+        mc.options.sprintKey.setPressed(sprint);
+        keysHeld = true;
+        if (forward) forwardTicks++;
+
+        if (sprint) {
+            if (!p.isSprinting() && !p.horizontalCollision) p.setSprinting(true);
+        } else if (p.isSprinting()) {
+            p.setSprinting(false);
+        }
+
+        // câmera: segue o rumo, olhando para baixo, com um leve balanço
+        if (holdForBreak) { HumanLook.coast(p); return; }   // quebrando algo demorado: mira parada
+        float ty = heading + (float) (Math.sin(tickCounter * 0.13) * 5.0);
+        float tp = MINE_PITCH + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 4.0);
+        HumanLook.step(p, ty, tp, true);
+    }
+
+    /** Quebra o bloco que está sob a mira (como quem segura o botão de ataque), todo tick. */
+    private static void mineAct(MinecraftClient mc, ClientPlayerEntity p) {
         HitResult cr = p.raycast(BREAK_RANGE, 1.0f, false);
-        if (cr.getType() == HitResult.Type.BLOCK) {
-            BlockHitResult cb = (BlockHitResult) cr;
-            BlockPos pos = cb.getBlockPos();
-            BlockState st = mc.world.getBlockState(pos);
-            if (inMineArea(pos.getX(), pos.getY(), pos.getZ()) && pos.getY() >= yFloor
-                    && isMinable(mc.world, pos) && playerAllows(mc, p, pos, st)) {
-                selectBestTool(p, st);
-                mc.interactionManager.updateBlockBreakingProgress(pos, cb.getSide());
-                p.swingHand(Hand.MAIN_HAND);
-                if (mc.world.getBlockState(pos).isAir()) {
-                    mineAnchor = Vec3d.ofCenter(pos);
-                    if (pos.equals(currentMine)) currentMine = null;
-                } else {
-                    hold = true;   // bloco lento: fica parado até quebrar (senão o progresso zera)
-                }
+        if (cr.getType() != HitResult.Type.BLOCK) return;
+        BlockHitResult cb = (BlockHitResult) cr;
+        BlockPos pos = cb.getBlockPos();
+        if (badTargets.contains(pos)) return;
+        BlockState st = mc.world.getBlockState(pos);
+        if (!inMineArea(pos.getX(), pos.getY(), pos.getZ()) || pos.getY() < slabBottomY()) return;
+        if (!isMinable(mc.world, pos) || !playerAllows(mc, p, pos, st)) return;
+
+        selectBestTool(p, st);
+        mc.interactionManager.updateBlockBreakingProgress(pos, cb.getSide());
+        p.swingHand(Hand.MAIN_HAND);
+
+        if (mc.world.getBlockState(pos).isAir()) {
+            // se o servidor devolve o bloco (protegido), não fica quebrando o mesmo para sempre
+            int n = breakCount.merge(pos, 1, Integer::sum);
+            if (n >= 4) badTargets.add(pos);
+        } else {
+            breakingSlow = true;   // bloco lento: para de voar até quebrar (senão o progresso zera)
+            if (pos.equals(slowPos)) {
+                if (++slowTicks > 40) { badTargets.add(pos); slowTicks = 0; }
+            } else {
+                slowPos = pos;
+                slowTicks = 0;
             }
         }
-
-        // 2) próximo alvo de mira
-        BlockHitResult hit = null;
-        if (currentMine != null) {
-            BlockState cs = mc.world.getBlockState(currentMine);
-            boolean ok = inMineArea(currentMine.getX(), currentMine.getY(), currentMine.getZ())
-                    && currentMine.getY() >= yFloor
-                    && p.getEyePos().squaredDistanceTo(Vec3d.ofCenter(currentMine)) <= REACH * REACH
-                    && isMinable(mc.world, currentMine)
-                    && playerAllows(mc, p, currentMine, cs);
-            if (ok) hit = rayTo(mc, p, currentMine);
-            if (hit == null) currentMine = null;
-        }
-
-        if (currentMine == null) {
-            final Vec3d eye = p.getEyePos();
-            int r = (int) Math.ceil(REACH);
-            BlockPos base = BlockPos.ofFloored(eye);
-            List<BlockPos> cands = new ArrayList<>();
-            for (int dx = -r; dx <= r; dx++)
-                for (int dy = -r; dy <= r; dy++)
-                    for (int dz = -r; dz <= r; dz++) {
-                        BlockPos pos = base.add(dx, dy, dz);
-                        if (!inMineArea(pos.getX(), pos.getY(), pos.getZ())) continue;
-                        if (pos.getY() < yFloor) continue;
-                        if (eye.squaredDistanceTo(Vec3d.ofCenter(pos)) > REACH * REACH) continue;
-                        if (!isMinable(mc.world, pos)) continue;
-                        if (!isExposed(mc.world, pos)) continue;
-                        if (!playerAllows(mc, p, pos, mc.world.getBlockState(pos))) continue;
-                        cands.add(pos);
-                    }
-            if (!cands.isEmpty()) {
-                // a mira "pinta" o chão: prefere blocos perto do último quebrado (câmera quase não se mexe)
-                final Vec3d ref = (mineAnchor != null && mineAnchor.squaredDistanceTo(eye) < 36.0) ? mineAnchor : eye;
-                final double yRef = slabTopY() + 0.5;
-                cands.sort(Comparator.comparingDouble(b -> {
-                    Vec3d c = Vec3d.ofCenter(b);
-                    double s = Math.sqrt(ref.squaredDistanceTo(c)) + 0.15 * Math.sqrt(eye.squaredDistanceTo(c));
-                    s += 0.5 * Math.max(0.0, yRef - (b.getY() + 0.5));      // prefere as camadas de cima
-                    if (isOre(mc.world.getBlockState(b))) s -= 1.5;          // minérios primeiro
-                    return s;
-                }));
-                int tries = 0;
-                for (BlockPos c : cands) {
-                    if (++tries > 40) break;
-                    BlockHitResult h = rayTo(mc, p, c);
-                    if (h != null) { currentMine = c; hit = h; break; }
-                }
-            }
-        }
-
-        if (currentMine != null && hit != null) aimPoint = hit.getPos();
-        return hold;
     }
 
     private static void selectBestTool(ClientPlayerEntity p, BlockState state) {
@@ -749,11 +860,7 @@ public class FarmBot {
                 || (targetBlock != null && !targetStillValid(mc));
         if (needNew) {
             if (target != null && targetBlock != null && targetAge > 300) badTargets.add(targetBlock);
-            if (!farm && target != null && targetBlock != null && reached(p, fly)
-                    && !mc.world.getBlockState(targetBlock).isAir()) {
-                badTargets.add(targetBlock);   // chegou e o bloco continua aí (não dá para quebrar dali): tenta outro
-            }
-            pickTarget(mc, p, fly);
+            pickTarget(p, fly);
         }
 
         // detector de travamento
@@ -779,13 +886,10 @@ public class FarmBot {
                 Vec3d dir = (fly ? to : flat).normalize();
                 float wantYaw = yawOf(to.x, to.z);
                 float dyaw = Math.abs(MathHelper.wrapDegrees(wantYaw - p.getYaw()));
-                // farm: reduz se a câmera não está virada para onde corre. Mineração voando: a câmera
-                // olha para os blocos e o voo não depende dela, então não reduz.
-                double turn = farm ? MathHelper.clamp(1.0 - dyaw / 100.0, 0.15, 1.0) : 1.0;
+                double turn = MathHelper.clamp(1.0 - dyaw / 100.0, 0.15, 1.0);
                 double slow = MathHelper.clamp(dist / 2.0, 0.3, 1.0);
                 double wobble = 1.0 + 0.06 * Math.sin(tickCounter * 0.09);
-                double speed = fly ? (farm ? FLY_SPEED : FLY_SPEED_MINE) : WALK_SPEED;
-                desired = dir.multiply(speed * turn * slow * wobble);
+                desired = dir.multiply((fly ? FLY_SPEED : WALK_SPEED) * turn * slow * wobble);
             }
         }
 
@@ -832,6 +936,7 @@ public class FarmBot {
         keysHeld = false;
         mc.options.forwardKey.setPressed(false);
         mc.options.jumpKey.setPressed(false);
+        mc.options.sprintKey.setPressed(false);
         if (mc.player != null && mc.player.isSprinting()) mc.player.setSprinting(false);
     }
 
@@ -1027,25 +1132,6 @@ public class FarmBot {
         return best;
     }
 
-    /** Mineração: vai até o bloco restante mais próximo, de preferência à frente e nas camadas de cima. */
-    private static BlockPos pickMineTarget(ClientPlayerEntity p, List<BlockPos> cands) {
-        double px = p.getX(), pz = p.getZ();
-        int top = slabTopY();
-        boolean moving = cmdVel.x * cmdVel.x + cmdVel.z * cmdVel.z > 0.0025;
-        float heading = moving ? yawOf(cmdVel.x, cmdVel.z) : 0f;
-        BlockPos best = null;
-        double bestCost = Double.MAX_VALUE;
-        for (BlockPos b : cands) {
-            double dx = b.getX() + 0.5 - px, dz = b.getZ() + 0.5 - pz;
-            double h2 = dx * dx + dz * dz;
-            if (h2 < 4.0) continue;   // já está colado: a mira cuida (ou não dá para quebrar dali)
-            double cost = Math.sqrt(h2) + 3.0 * (top - b.getY());
-            if (moving) cost += Math.abs(MathHelper.wrapDegrees(yawOf(dx, dz) - heading)) / 30.0;   // 180° custa ~6 blocos
-            if (cost < bestCost) { bestCost = cost; best = b; }
-        }
-        return best;
-    }
-
     /** Escolha usada na mineração: aleatória, favorecendo os mais próximos. */
     private static BlockPos pickNearRandom(ClientPlayerEntity p, List<BlockPos> candidates) {
         final double px = p.getX(), pz = p.getZ();
@@ -1076,7 +1162,7 @@ public class FarmBot {
     }
 
     /** Próximo alvo: aleatório, mas favorecendo os mais próximos (corrida contínua, sem zigue-zague). */
-    private static void pickTarget(MinecraftClient mc, ClientPlayerEntity p, boolean fly) {
+    private static void pickTarget(ClientPlayerEntity p, boolean fly) {
         targetAge = 0;
         targetBlock = null;
 
@@ -1084,44 +1170,20 @@ public class FarmBot {
         boolean mine = FarmConfig.task == FarmConfig.Task.MINE;
         if (mine) {
             candidates.addAll(mineCandidates);
-            candidates.removeIf(b -> mc.world.getBlockState(b).isAir());   // já quebrados
         } else {
             candidates.addAll(ready);
             candidates.addAll(replantQueue.keySet());
         }
         candidates.removeIf(badTargets::contains);
 
-        if (mine && candidates.isEmpty() && mineCount > 0) {
-            // a lista acabou (os alvos foram quebrados voando): pede um novo scan e paira até chegar
-            if (tickCounter - lastForcedScan >= 10) {
-                lastForcedScan = tickCounter;
-                scanTimer = 0;
-            }
-            target = p.getPos();
-            return;
-        }
-
         if (!candidates.isEmpty()) {
-            BlockPos c = mine ? pickMineTarget(p, candidates) : pickAhead(p, candidates);
-            if (c != null) {
-                targetBlock = c;
-                aimOffset = new Vec3d((RNG.nextDouble() - 0.5) * 0.4,
-                        (RNG.nextDouble() - 0.5) * 0.2, (RNG.nextDouble() - 0.5) * 0.4);
-                double y;
-                if (mine) y = fly ? (isPR() ? slabTopY() : c.getY()) + 1.3 : c.getY();   // pairar logo acima do chão/fatia
-                else y = fly ? c.getY() + 1.0 : c.getY();
-                target = new Vec3d(c.getX() + 0.5, y, c.getZ() + 0.5);
-                return;
-            }
-            if (mine) {
-                // só restam blocos colados no jogador que não dá para quebrar daqui (ex.: o chão sob o pé):
-                // dá um passo de lado para quebrá-los de outro ponto
-                double ang = RNG.nextDouble() * Math.PI * 2.0;
-                double tx = MathHelper.clamp(p.getX() + Math.cos(ang) * 4.0, FarmConfig.minX() + 0.5, FarmConfig.maxX() + 0.5);
-                double tz = MathHelper.clamp(p.getZ() + Math.sin(ang) * 4.0, FarmConfig.minZ() + 0.5, FarmConfig.maxZ() + 0.5);
-                target = new Vec3d(tx, p.getY(), tz);
-                return;
-            }
+            BlockPos c = mine ? pickNearRandom(p, candidates) : pickAhead(p, candidates);
+            targetBlock = c;
+            aimOffset = new Vec3d((RNG.nextDouble() - 0.5) * 0.4,
+                    (RNG.nextDouble() - 0.5) * 0.2, (RNG.nextDouble() - 0.5) * 0.4);
+            double y = (fly && !mine) ? c.getY() + 1.0 : c.getY();
+            target = new Vec3d(c.getX() + 0.5, y, c.getZ() + 0.5);
+            return;
         }
 
         // nada para fazer: passeia pela área e às vezes para um pouco
