@@ -71,6 +71,9 @@ public class FarmScreen extends Screen {
             new Card("ores", "Só minérios", Items.DIAMOND,
                     "Ativado: quebra apenas minérios expostos. Desativado: quebra tudo (esvazia a zona). Vale para a zona da aba atual.",
                     Tab.ALL, Tab.EC, Tab.PR),
+            new Card("speed", "Vel. de voo", Items.FIREWORK_ROCKET,
+                    "Velocidade do voo na mineração (multiplica o voo normal, com sprint). Clique para alternar 1.0X a 3.0X. Mais rápido = mais blocos pulados e mais risco de o servidor reclamar.",
+                    Tab.ALL, Tab.EC, Tab.PR),
             new Card("move", "Voar (Farm)", Items.FEATHER,
                     "Só vale para o Farm: ativado voa, desativado corre. A mineração (EC e PR) sempre voa e precisa da permissão de voo.",
                     Tab.ALL, Tab.FARM, Tab.SYSTEM),
@@ -229,6 +232,7 @@ public class FarmScreen extends Screen {
             case "ores": return zoneCtx() == FarmConfig.MineZone.PR ? FarmConfig.oresOnlyPR : FarmConfig.oresOnlyEC;
             case "move": return FarmConfig.mode == FarmConfig.Mode.FLY;
             case "area": return FarmConfig.areaSet;
+            case "speed": return true;
             case "guard": return FarmConfig.guardEnabled;
             case "sound": return FarmConfig.alertSound;
             default: return false;
@@ -237,6 +241,7 @@ public class FarmScreen extends Screen {
 
     private static String statusLabel(String id, boolean on) {
         if (id.equals("area")) return on ? "DEFINIDA" : "SEM ÁREA";
+        if (id.equals("speed")) return FarmConfig.mineFlySpeed + "X";
         return on ? "ATIVADO" : "DESATIVADO";
     }
 
@@ -263,6 +268,13 @@ public class FarmScreen extends Screen {
             case "move":
                 FarmConfig.mode = FarmConfig.mode == FarmConfig.Mode.WALK ? FarmConfig.Mode.FLY : FarmConfig.Mode.WALK;
                 break;
+            case "speed": {
+                float[] steps = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f};
+                int idx = 0;
+                for (int i = 0; i < steps.length; i++) if (Math.abs(steps[i] - FarmConfig.mineFlySpeed) < 0.01f) idx = i;
+                FarmConfig.mineFlySpeed = steps[(idx + 1) % steps.length];
+                break;
+            }
             case "guard":
                 FarmConfig.guardEnabled = !FarmConfig.guardEnabled;
                 break;
@@ -490,7 +502,8 @@ public class FarmScreen extends Screen {
         boolean bHov = inView && in(mx, my, bx, by, bw, bh);
         int col = on ? (bHov ? C_GREEN_H : C_GREEN) : (bHov ? C_RED_H : C_RED);
         rr(c, bx, by, bw, bh, col);
-        ctext(c, spaced(statusLabel(k.id, on)), x + w / 2, by + 3, C_TEXT);
+        String lab = statusLabel(k.id, on);
+        ctext(c, k.id.equals("speed") ? lab : spaced(lab), x + w / 2, by + 3, C_TEXT);
         hitClip(bx, by, bw, bh, H_TOGGLE, idx);
     }
 

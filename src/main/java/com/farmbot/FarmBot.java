@@ -66,6 +66,9 @@ public class FarmBot {
     // --- mineração ---
     private static final List<BlockPos> mineCandidates = new ArrayList<>();
     private static int mineCount = 0;
+    private static boolean flyBoosted;                  // velocidade de voo do jogador alterada pela mineração
+    private static float origFlySpeed = 0.05f;
+    private static int brakeTicks;                      // ticks de freio ativo depois de virar na borda
     private static int mineTopY = Integer.MIN_VALUE;   // Y do bloco mais alto achado no último scan (altura do voo)
     private static BlockPos slowPos;                    // bloco lento em quebra (detecta bloco protegido)
     private static int slowTicks;
@@ -122,6 +125,7 @@ public class FarmBot {
         mineTopY = Integer.MIN_VALUE;
         slowPos = null;
         slowTicks = 0;
+        brakeTicks = 0;
         breakCount.clear();
         target = null; targetBlock = null; lastCheckPos = null; aimPoint = null;
         cmdVel = Vec3d.ZERO;
@@ -137,6 +141,7 @@ public class FarmBot {
 
     public static void stop(MinecraftClient mc, String message) {
         FarmConfig.enabled = false;
+        restoreFly(mc);
         cmdVel = Vec3d.ZERO;
         aimPoint = null;
         releaseKeys(mc);
@@ -632,6 +637,34 @@ public class FarmBot {
     //  rumo olhando para baixo e o bot quebra o bloco que estiver sob a mira, a cada tick.
     // ------------------------------------------------------------------
 
+    /** Aplica o multiplicador de velocidade de voo (o sprint dobra o valor base). Restaurado em stop(). */
+    private static void boostFly(ClientPlayerEntity p) {
+        if (!flyBoosted) {
+            origFlySpeed = p.getAbilities().getFlySpeed();
+            flyBoosted = true;
+        }
+        p.getAbilities().setFlySpeed(origFlySpeed * FarmConfig.mineFlySpeed);
+    }
+
+    private static void restoreFly(MinecraftClient mc) {
+        if (flyBoosted && mc.player != null) mc.player.getAbilities().setFlySpeed(origFlySpeed);
+        flyBoosted = false;
+    }
+
+    /**
+     * Distância da borda em que o rumo é trocado. Cresce com a velocidade, porque o voo desliza
+     * (~2 blocos de frenagem por bloco/tick) e passar da folga da área dispara a proteção.
+     */
+    private static double mineTrigger() {
+        return Math.max(wallTrigger(), 2.4 * FarmConfig.mineFlySpeed);
+    }
+
+    /** Velocidade vertical (paira na altura certa) e horizontal (damp < 1 = freio ativo). */
+    private static void applyFlightVelocity(ClientPlayerEntity p, double damp) {
+        Vec3d v = p.getVelocity();
+        p.setVelocity(v.x * damp, MathHelper.clamp((mineHoverY() - p.getY()) * 0.35, -0.5, 0.5), v.z * damp);
+    }
+
     /** Y (índice do bloco) da superfície que está sendo minerada. */
     private static int mineSurfaceY() {
         if (isPR()) return slabTopY();
@@ -667,7 +700,7 @@ public class FarmBot {
      */
     private static void newMineHeading(MinecraftClient mc, ClientPlayerEntity p, int mode) {
         final double px = p.getX(), pz = p.getZ();
-        double trig = wallTrigger();
+        double trig = mineTrigger();
         float cur = heading;
         float best = cur;
         double bestScore = -1.0e9;
@@ -713,6 +746,7 @@ public class FarmBot {
         }
         heading = best;
         headingTicks = 20 + RNG.nextInt(21);   // reavalia a cada 1–2 s, seguindo o que sobrou
+        if (mode >= 1) brakeTicks = 8;         // virou por causa da borda/trava: freia para não deslizar para fora
     }
 
     private static void runMine(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
@@ -721,13 +755,11 @@ public class FarmBot {
             p.sendAbilitiesUpdate();
         }
         final double px = p.getX(), pz = p.getZ();
+        boostFly(p);
 
-        // altitude: paira logo acima da superfície (controle proporcional da velocidade vertical)
-        Vec3d v = p.getVelocity();
-        p.setVelocity(v.x, MathHelper.clamp((mineHoverY() - p.getY()) * 0.35, -0.5, 0.5), v.z);
-
-        // mina vazia: paira olhando para baixo, esperando regenerar
+        // mina vazia: paira (freando) olhando para baixo, esperando regenerar
         if (mineCount == 0) {
+            applyFlightVelocity(p, 0.6);
             mc.options.forwardKey.setPressed(false);
             mc.options.sprintKey.setPressed(false);
             keysHeld = true;
@@ -753,7 +785,7 @@ public class FarmBot {
             double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
             heading = yawOf(cx - px, cz - pz);
             headingTicks = 30;
-        } else if (freeDist(px, pz, heading, EDGE_MARGIN) < wallTrigger()) {
+        } else if (freeDist(px, pz, heading, EDGE_MARGIN) < mineTrigger()) {
             newMineHeading(mc, p, 1);
         } else if (--headingTicks <= 0) {
             newMineHeading(mc, p, 0);
@@ -766,6 +798,10 @@ public class FarmBot {
             forward = false;   // a câmera ainda aponta para a borda: termina de virar antes de voar
         }
         boolean sprint = forward && yawErr < 35f;
+
+        // altitude + freio: sem W (virando) ou logo depois de virar na borda, corta a velocidade horizontal
+        if (brakeTicks > 0) brakeTicks--;
+        applyFlightVelocity(p, (!forward || brakeTicks > 0) ? 0.6 : 1.0);
 
         mc.options.forwardKey.setPressed(forward);
         mc.options.jumpKey.setPressed(false);

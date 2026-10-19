@@ -33,6 +33,8 @@ public class FarmConfig {
     /** Proteção (reinício/teleporte/saída da área) e som de alerta. */
     public static boolean guardEnabled = true;
     public static boolean alertSound = true;
+    /** Multiplicador da velocidade de voo na mineração (1.0 = voo normal do jogador; com sprint ~20 blocos/s). */
+    public static float mineFlySpeed = 1.5f;
     public static boolean replant = true;
     public static boolean areaSet = false;
     public static final int[] p1 = {0, 64, 0};
@@ -68,6 +70,7 @@ public class FarmConfig {
         boolean replant, areaSet;
         // Boolean (objeto) para distinguir "ausente" de "false" em configs antigas
         Boolean oresOnlyEC, oresOnlyPR, guardEnabled, alertSound;
+        Float mineFlySpeed;
         List<String> crops;
     }
 
@@ -87,6 +90,7 @@ public class FarmConfig {
             d.oresOnlyPR = oresOnlyPR;
             d.guardEnabled = guardEnabled;
             d.alertSound = alertSound;
+            d.mineFlySpeed = mineFlySpeed;
             d.replant = replant;
             d.areaSet = areaSet;
             d.crops = new ArrayList<>();
@@ -114,6 +118,7 @@ public class FarmConfig {
             if (d.oresOnlyPR != null) oresOnlyPR = d.oresOnlyPR;
             if (d.guardEnabled != null) guardEnabled = d.guardEnabled;
             if (d.alertSound != null) alertSound = d.alertSound;
+            if (d.mineFlySpeed != null) mineFlySpeed = Math.max(0.5f, Math.min(3.0f, d.mineFlySpeed));
             replant = d.replant;
             areaSet = d.areaSet;
             if (d.crops != null) {
