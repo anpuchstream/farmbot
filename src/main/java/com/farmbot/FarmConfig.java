@@ -37,6 +37,11 @@ public class FarmConfig {
     /** true = quebra só minérios expostos; false = quebra tudo (esvazia a zona). Um valor por zona. */
     public static boolean oresOnlyEC = false;
     public static boolean oresOnlyPR = false;
+    /**
+     * Modo PR: true = "Todos os blocos" (quebra tudo, menos cerca, placa e bedrock).
+     * É o oposto de oresOnlyPR (só minérios + terracota): sempre um dos dois fica ativo.
+     */
+    public static boolean allBlocksPR = true;
     /** Proteção (reinício/teleporte/saída da área) e som de alerta. */
     public static boolean guardEnabled = true;
     public static boolean alertSound = true;
@@ -78,7 +83,7 @@ public class FarmConfig {
         String mode, task, mineZone, prMode;
         boolean replant, areaSet;
         // Boolean (objeto) para distinguir "ausente" de "false" em configs antigas
-        Boolean oresOnlyEC, oresOnlyPR, guardEnabled, alertSound, recorderLoop;
+        Boolean oresOnlyEC, oresOnlyPR, allBlocksPR, guardEnabled, alertSound, recorderLoop;
         Float mineFlySpeed;
         List<String> crops;
     }
@@ -98,6 +103,7 @@ public class FarmConfig {
             d.prMode = prMode.name();
             d.oresOnlyEC = oresOnlyEC;
             d.oresOnlyPR = oresOnlyPR;
+            d.allBlocksPR = allBlocksPR;
             d.guardEnabled = guardEnabled;
             d.alertSound = alertSound;
             d.recorderLoop = recorderLoop;
@@ -130,6 +136,9 @@ public class FarmConfig {
             }
             if (d.oresOnlyEC != null) oresOnlyEC = d.oresOnlyEC;
             if (d.oresOnlyPR != null) oresOnlyPR = d.oresOnlyPR;
+            // config antiga (sem allBlocksPR): "só minérios" desligado já quebrava tudo
+            allBlocksPR = d.allBlocksPR != null ? d.allBlocksPR : !oresOnlyPR;
+            oresOnlyPR = !allBlocksPR;   // os dois modos do PR são exclusivos
             if (d.guardEnabled != null) guardEnabled = d.guardEnabled;
             if (d.alertSound != null) alertSound = d.alertSound;
             if (d.recorderLoop != null) recorderLoop = d.recorderLoop;

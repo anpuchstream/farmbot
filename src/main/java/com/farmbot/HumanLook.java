@@ -41,8 +41,16 @@ public final class HumanLook {
      * @param aiming true quando está mirando numa planta (balanço menor, para não sair de cima dela)
      */
     public static void step(ClientPlayerEntity p, float targetYaw, float targetPitch, boolean aiming) {
+        step(p, targetYaw, targetPitch, aiming ? 0.35f : 1.0f);
+    }
+
+    /** Câmera travada: mesma dinâmica de giro, mas SEM balanço (a mira fica parada até o alvo mudar). */
+    public static void stepLocked(ClientPlayerEntity p, float targetYaw, float targetPitch) {
+        step(p, targetYaw, targetPitch, 0f);
+    }
+
+    private static void step(ClientPlayerEntity p, float targetYaw, float targetPitch, float sway) {
         ticks++;
-        float sway = aiming ? 0.35f : 1.0f;
         float swayYaw = (float) (Math.sin(ticks * 0.037 + phaseA) * 0.9
                 + Math.sin(ticks * 0.093 + phaseB) * 0.4) * sway;
         float swayPitch = (float) (Math.sin(ticks * 0.045 + phaseB) * 0.7) * sway;

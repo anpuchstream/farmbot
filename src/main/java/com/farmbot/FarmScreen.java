@@ -70,17 +70,20 @@ public class FarmScreen extends Screen {
                     "Zona totalmente plana. O bot voa em sprint olhando para baixo, quebrando o bloco sob a mira, e espera a mina regenerar.",
                     Tab.ALL, Tab.EC),
             new Card("pr", "Modo PR", Items.NETHERITE_PICKAXE,
-                    "Zona de mina funda (prisão): minérios e terracota. Ative e escolha abaixo como o bot trabalha: Em cima ou Corredor.",
+                    "Zona de mina funda (prisão): minérios e terracota, ou todos os blocos. Ative e escolha abaixo como o bot trabalha: Em cima ou Corredor.",
                     Tab.ALL, Tab.PR),
             new Card("prtop", "PR: Em cima", Items.ELYTRA,
                     "O bot voa em sprint por cima da mina, olhando para baixo. Quando a camada de cima é quebrada (por encantamentos), ele desce sozinho para ficar no alcance e continuar minerando.",
                     Tab.PR),
             new Card("prcor", "PR: Corredor", Items.BEDROCK,
-                    "O bot fica no espaço entre a bedrock e a mina: LIGUE-O ali, de frente para a mina. Ele sobe e desce em diagonais, para a direita e para a esquerda, minerando a parede, de forma humanizada.",
+                    "O bot fica no espaço entre a bedrock e a mina: LIGUE-O ali, de frente para a mina. Ele desce em diagonal (como SHIFT + A/D com o botão de quebrar pressionado), inverte na última camada e sobe na diagonal do mesmo lado, rodeando a mina. A mira fica travada e só gira ao contornar um canto.",
                     Tab.PR),
             new Card("ores", "Só minérios", Items.DIAMOND,
                     "Ativado: quebra apenas minérios expostos. Desativado: quebra tudo (esvazia a zona). Vale para a zona da aba atual. No modo PR também quebra terracota.",
                     Tab.ALL, Tab.EC, Tab.PR),
+            new Card("allblocks", "Todos os blocos", Items.NETHERITE_PICKAXE,
+                    "Ativado: quebra todos os blocos da zona, exceto cerca, placa e bedrock. Desativado: volta para Minérios + terracota.",
+                    Tab.PR),
             new Card("speed", "Vel. de voo", Items.FIREWORK_ROCKET,
                     "Velocidade do voo na mineração (multiplica o voo normal, com sprint). Clique para alternar 1.0X a 3.0X. Mais rápido = mais blocos pulados e mais risco de o servidor reclamar.",
                     Tab.ALL, Tab.EC, Tab.PR),
@@ -273,7 +276,7 @@ public class FarmScreen extends Screen {
 
     private static String descOf(Card k) {
         if (k.id.equals("ores") && zoneCtx() == FarmConfig.MineZone.PR) {
-            return "Ativado: quebra apenas minérios e terracotas expostos. Desativado: quebra tudo (esvazia a zona).";
+            return "Ativado: quebra apenas minérios e terracotas expostos. Desativado: muda para Todos os blocos.";
         }
         return k.desc;
     }
@@ -289,6 +292,7 @@ public class FarmScreen extends Screen {
             case "prcor": return FarmConfig.task == FarmConfig.Task.MINE && FarmConfig.mineZone == FarmConfig.MineZone.PR
                     && FarmConfig.prMode == FarmConfig.PrMode.CORRIDOR;
             case "ores": return zoneCtx() == FarmConfig.MineZone.PR ? FarmConfig.oresOnlyPR : FarmConfig.oresOnlyEC;
+            case "allblocks": return FarmConfig.allBlocksPR;
             case "move": return FarmConfig.mode == FarmConfig.Mode.FLY;
             case "area": return FarmConfig.areaSet;
             case "speed": return true;
@@ -337,8 +341,14 @@ public class FarmScreen extends Screen {
                 FarmConfig.prMode = FarmConfig.PrMode.CORRIDOR;
                 break;
             case "ores":
-                if (zoneCtx() == FarmConfig.MineZone.PR) FarmConfig.oresOnlyPR = !FarmConfig.oresOnlyPR;
-                else FarmConfig.oresOnlyEC = !FarmConfig.oresOnlyEC;
+                if (zoneCtx() == FarmConfig.MineZone.PR) {
+                    FarmConfig.oresOnlyPR = !FarmConfig.oresOnlyPR;
+                    FarmConfig.allBlocksPR = !FarmConfig.oresOnlyPR;   // exclusivos
+                } else FarmConfig.oresOnlyEC = !FarmConfig.oresOnlyEC;
+                break;
+            case "allblocks":
+                FarmConfig.allBlocksPR = !FarmConfig.allBlocksPR;
+                FarmConfig.oresOnlyPR = !FarmConfig.allBlocksPR;       // exclusivos
                 break;
             case "move":
                 FarmConfig.mode = FarmConfig.mode == FarmConfig.Mode.WALK ? FarmConfig.Mode.FLY : FarmConfig.Mode.WALK;

@@ -125,7 +125,6 @@ public class FarmBot {
         mineCount = 0;
         surfaceY = Integer.MIN_VALUE;
         surfaceTimer = 0;
-        corTarget = null;
         corVel = Vec3d.ZERO;
         mineEmptyTicks = 0;
         mineTopY = Integer.MIN_VALUE;
@@ -154,7 +153,6 @@ public class FarmBot {
         FarmConfig.enabled = false;
         restoreFly(mc);
         corVel = Vec3d.ZERO;
-        corTarget = null;
         cmdVel = Vec3d.ZERO;
         aimPoint = null;
         releaseKeys(mc);
@@ -578,15 +576,28 @@ public class FarmBot {
         return false;
     }
 
+    /** Blocos que o PR "Todos os blocos" nunca quebra: cercas, placas (comuns e suspensas) e bedrock. */
+    private static boolean isProtectedBlock(BlockState s) {
+        return s.isOf(Blocks.BEDROCK)
+                || s.isIn(BlockTags.FENCES)
+                || s.isIn(BlockTags.ALL_SIGNS);
+    }
+
     private static boolean isMinable(World w, BlockPos pos) {
         BlockState s = w.getBlockState(pos);
         if (s.isAir()) return false;
         if (!s.getFluidState().isEmpty()) return false;
         if (s.hasBlockEntity()) return false;
         if (s.getHardness(w, pos) < 0) return false;
-        if (FarmConfig.oresOnly()) {
-            // no PR, "só minérios" também quebra terracota (o piso das minas de prisão)
-            if (isPR() ? !(isOre(s) || isTerracotta(s)) : !isOre(s)) return false;
+        if (isPR()) {
+            if (FarmConfig.allBlocksPR) {
+                // PR "Todos os blocos": quebra tudo, menos cerca, placa e bedrock
+                if (isProtectedBlock(s)) return false;
+            } else if (!(isOre(s) || isTerracotta(s))) {
+                return false;   // PR "Só minérios": minérios + terracota (o piso das minas de prisão)
+            }
+        } else if (FarmConfig.oresOnlyEC && !isOre(s)) {
+            return false;
         }
         for (Direction d : Direction.values()) {
             if (!w.getFluidState(pos.offset(d)).isEmpty()) return false;
@@ -1097,16 +1108,22 @@ public class FarmBot {
 
     // ------------------------------------------------------------------
     //  PR "CORREDOR": o bot fica no espaço entre a bedrock e a mina (ligue-o ali, de frente para a mina).
-    //  A parede da mina é a "frente". Ele sobe e desce em diagonais, ora para a direita, ora para a
-    //  esquerda ao longo da parede, mirando e quebrando o que está ao alcance. Tudo com aceleração
-    //  suave, pausas curtas e velocidades que variam a cada pernada, para parecer um jogador.
+    //  A parede da mina é a "frente". Como um jogador segurando SHIFT + A (ou D) + botão de quebrar:
+    //  desce em diagonal, rápido, sempre para o mesmo lado; ao chegar na última camada inverte e SOBE
+    //  na diagonal do mesmo lado, e assim por diante, rodeando a mina. A mira fica TRAVADA na parede
+    //  (quebra o que aparece no crosshair) e só gira quando ele contorna o canto para a próxima parede.
     // ------------------------------------------------------------------
     private static int corNX, corNZ;          // direção da mina vista do corredor (um dos dois é 0)
     private static double corN0;              // posição inicial no eixo da frente (limite para trás)
-    private static int corLegT, corLegLeft, corPause, corDir = 1, corVertHint, corTargetAge;
-    private static double corY0, corYT, corLatSpeed;
-    private static Vec3d corVel = Vec3d.ZERO, corAim = Vec3d.ZERO;
-    private static BlockPos corTarget;
+    /** Lado da diagonal em relação ao "direita" do jogador (+1 direita / -1 esquerda). Mantido nos cantos. */
+    private static int corDir = 1;
+    /** Vertical: -1 desce, +1 sobe. */
+    private static int corVDir = -1;
+    private static int corTurnTicks, corBlockedTicks;
+    private static double corLastLat;
+    private static Vec3d corVel = Vec3d.ZERO;
+    /** Pitch fixo da câmera no corredor (0 = olhando reto para a parede). */
+    private static final float COR_PITCH = 0f;
 
     private static boolean isBreakableSolid(World w, BlockPos pos, BlockState s) {
         return !s.isAir() && s.getFluidState().isEmpty() && !s.hasBlockEntity() && s.getHardness(w, pos) >= 0;
@@ -1137,14 +1154,17 @@ public class FarmBot {
         corNX = dirs[bi][0];
         corNZ = dirs[bi][1];
         corN0 = p.getX() * corNX + p.getZ() * corNZ;
-        corLegLeft = 0;
-        corLegT = 1;
-        corPause = 0;
-        corVertHint = 0;
-        corTargetAge = 0;
-        corDir = RNG.nextBoolean() ? 1 : -1;
+        corTurnTicks = 0;
+        corBlockedTicks = 0;
         corVel = Vec3d.ZERO;
-        corTarget = null;
+        corLastLat = latPos(p);
+        // começa DESCENDO (a menos que já esteja embaixo) e para o lado onde há mais espaço
+        corVDir = p.getY() <= corBottomY() + 1.0 ? 1 : -1;
+        double[] lr = latRange();
+        double lat = latPos(p);
+        int rs = corNX - corNZ;                       // sinal (no mundo) do "direita" do jogador
+        int worldSign = (lr[1] - lat) >= (lat - lr[0]) ? 1 : -1;
+        corDir = worldSign * rs;
         return true;
     }
 
@@ -1215,35 +1235,6 @@ public class FarmBot {
                 }
     }
 
-    /** Escolhe (entre os 3 mais próximos) um bloco visível e ao alcance para a câmera mirar. */
-    private static void updateCorridorTarget(MinecraftClient mc, ClientPlayerEntity p) {
-        Vec3d eye = p.getEyePos();
-        if (corTarget != null) {
-            corTargetAge++;
-            double r = REACH + 0.6;
-            if (mc.world.getBlockState(corTarget).isAir() || badTargets.contains(corTarget) || corTargetAge > 60
-                    || eye.squaredDistanceTo(Vec3d.ofCenter(corTarget)) > r * r) {
-                corTarget = null;
-            }
-        }
-        if (corTarget != null) return;
-        List<BlockPos> ok = new ArrayList<>();
-        for (BlockPos b : mineCandidates) {
-            if (mc.world.getBlockState(b).isAir() || badTargets.contains(b)) continue;
-            if (eye.squaredDistanceTo(Vec3d.ofCenter(b)) > REACH * REACH) continue;
-            if (rayTo(mc, p, b) == null) continue;
-            ok.add(b);
-            if (ok.size() >= 3) break;
-        }
-        if (!ok.isEmpty()) {
-            corTarget = ok.get(RNG.nextInt(ok.size()));
-            corTargetAge = 0;
-            corAim = new Vec3d((RNG.nextDouble() - 0.5) * 0.5, (RNG.nextDouble() - 0.5) * 0.5, (RNG.nextDouble() - 0.5) * 0.5);
-        } else if (tickCounter % 5 == 0) {
-            scanTimer = 0;   // a lista acabou (encantamentos quebraram tudo): reescaneia logo
-        }
-    }
-
     /** Distância (no eixo da frente) até o bloco mais próximo que está bem à frente do bot; MAX_VALUE = nenhum. */
     private static double faceDistAhead(ClientPlayerEntity p) {
         double best = Double.MAX_VALUE;
@@ -1269,47 +1260,61 @@ public class FarmBot {
         return true;
     }
 
-    /** Começa uma pernada: um trecho subindo ou descendo, com deriva para um dos lados. */
-    private static void startCorridorLeg(ClientPlayerEntity p, double[] lr) {
-        double y0 = p.getY();
-        double lat = latPos(p);
-        BlockPos anchor = mineCandidates.isEmpty() ? null : mineCandidates.get(0);
-        double cy = anchor != null ? anchor.getY() - 0.6 : y0;   // pés um pouco abaixo do alvo (o olho fica a ~1,6)
+    /** Velocidade por eixo (blocos/tick) da diagonal: o multiplicador do menu manda (1.5X = 0.6 por eixo). */
+    private static double corSpeed() {
+        return Math.min(0.40 * FarmConfig.mineFlySpeed, MAX_MINE_SPEED / 1.4142);
+    }
 
-        // faixa vertical em volta de onde há blocos
-        double half = 2.5 + RNG.nextDouble() * 2.0;
-        double yMin = Math.max(FarmConfig.minY() + 1.0, cy - half);
-        double yMax = Math.min(FarmConfig.maxY() + 1.5, cy + half);
-        if (yMax - yMin < 2.0) {
-            yMin = Math.max(FarmConfig.minY() + 1.0, cy - 1.5);
-            yMax = yMin + 3.0;
-        }
-        boolean up;
-        if (corVertHint != 0) {
-            up = corVertHint > 0;
-            corVertHint = 0;
-        } else {
-            up = y0 < (yMin + yMax) / 2.0 ? RNG.nextInt(100) < 85 : RNG.nextInt(100) < 15;
-        }
-        double yt = up ? yMax - RNG.nextDouble() : yMin + RNG.nextDouble();
-        if (Math.abs(yt - y0) < 1.5) yt = y0 + (up ? 2.5 : -2.5);
-        corY0 = y0;
-        corYT = yt;
-        corLegT = (int) MathHelper.clamp(Math.abs(yt - y0) / (0.09 + RNG.nextDouble() * 0.06), 30, 120);
+    /** Altura mais baixa (pés) da descida: a última camada da área. */
+    private static double corBottomY() {
+        return FarmConfig.minY();
+    }
 
-        // lado da diagonal: vai em direção ao trabalho; perto dele, às vezes inverte (direita/esquerda)
-        if (anchor != null) {
-            double alat = corNX != 0 ? anchor.getZ() + 0.5 : anchor.getX() + 0.5;
-            if (Math.abs(alat - lat) > 5.0) corDir = alat > lat ? 1 : -1;
-            else if (RNG.nextInt(100) < 30) corDir = -corDir;
-        } else if (RNG.nextInt(100) < 30) {
-            corDir = -corDir;
+    /** Altura mais alta (pés) da subida: o olho fica na última camada de cima. */
+    private static double corTopY() {
+        return Math.max(FarmConfig.maxY() - 1.0, corBottomY() + 2.5);
+    }
+
+    /** Sentido (+1/-1) da diagonal no eixo X/Z do mundo, a partir do lado (direita/esquerda) escolhido. */
+    private static int latWorldSign() {
+        return corDir * (corNX - corNZ);
+    }
+
+    /** Tem parede/bloco sólido logo à frente, na direção lateral (corpo inteiro)? */
+    private static boolean lateralBlocked(MinecraftClient mc, ClientPlayerEntity p, int ws, double speed) {
+        double d = 0.45 + speed;
+        double x = p.getX() + (corNX == 0 ? ws * d : 0);
+        double z = p.getZ() + (corNX != 0 ? ws * d : 0);
+        int by = MathHelper.floor(p.getY());
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int h = 0; h <= 1; h++) {
+            m.set(MathHelper.floor(x), by + h, MathHelper.floor(z));
+            if (!mc.world.getBlockState(m).getCollisionShape(mc.world, m).isEmpty()) return true;
         }
-        if (lat > lr[1] - 2.0) corDir = -1;
-        else if (lat < lr[0] + 2.0) corDir = 1;
-        corLatSpeed = 0.07 + RNG.nextDouble() * 0.15;
-        corLegLeft = corLegT;
-        corPause = RNG.nextInt(100) < 30 ? 3 + RNG.nextInt(14) : 0;   // às vezes uma pausinha entre as pernadas
+        return false;
+    }
+
+    /**
+     * Chegou no fim da parede (canto do corredor): contorna a mina. O lado da diagonal é mantido; a nova
+     * "frente" gira 90° e o bot passa a andar na direção da antiga frente. Só vira se o corredor continuar
+     * (3 blocos livres); senão devolve false e o bot apenas inverte o lado (corredor de uma parede só).
+     */
+    private static boolean cornerTurn(MinecraftClient mc, ClientPlayerEntity p) {
+        int by = MathHelper.floor(p.getY());
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int k = 1; k <= 3; k++) {
+            for (int h = 0; h <= 1; h++) {
+                m.set(MathHelper.floor(p.getX() + corNX * k), by + h, MathHelper.floor(p.getZ() + corNZ * k));
+                if (!mc.world.getBlockState(m).getCollisionShape(mc.world, m).isEmpty()) return false;
+            }
+        }
+        int nx = corDir * corNZ, nz = -corDir * corNX;
+        corNX = nx;
+        corNZ = nz;
+        corN0 = p.getX() * corNX + p.getZ() * corNZ;
+        mineCandidates.clear();
+        scanTimer = 0;     // reescaneia já a nova parede
+        return true;
     }
 
     private static void runCorridor(MinecraftClient mc, ClientPlayerEntity p) {
@@ -1323,69 +1328,48 @@ public class FarmBot {
         keysHeld = true;
         if (p.isSprinting()) p.setSprinting(false);
 
-        updateCorridorTarget(mc, p);
+        // ---- câmera TRAVADA na parede (sem balanço): só gira quando o bot contorna um canto
+        HumanLook.stepLocked(p, yawOf(corNX, corNZ), COR_PITCH);
 
-        // ---- câmera: mira no bloco escolhido; sem alvo, olha para a parede com um leve balanço
-        float ty, tp;
-        if (corTarget != null) {
-            Vec3d eye = p.getEyePos();
-            Vec3d to = Vec3d.ofCenter(corTarget).add(corAim);
-            double dx = to.x - eye.x, dy = to.y - eye.y, dz = to.z - eye.z;
-            ty = yawOf(dx, dz);
-            tp = (float) -Math.toDegrees(Math.atan2(dy, Math.hypot(dx, dz)));
-        } else {
-            ty = yawOf(corNX, corNZ) + (float) (Math.sin(tickCounter * 0.05) * 6.0);
-            tp = 6f + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 4.0) - (float) (corVel.y * 40.0);
-        }
-        HumanLook.step(p, ty, MathHelper.clamp(tp, -80f, 80f), corTarget != null);
+        final double s = corSpeed();
+        if (corTurnTicks > 0) corTurnTicks--;
 
-        // mina vazia: para devagar e espera regenerar
-        if (mineCount == 0) {
-            corVel = corVel.multiply(0.6);
-            p.setVelocity(corVel);
-            return;
-        }
+        // ---- vertical: desce até a última camada, inverte e sobe (e vice-versa)
+        if (corVDir < 0 && (p.getY() <= corBottomY() || (p.verticalCollision && corVel.y < -0.05))) corVDir = 1;
+        else if (corVDir > 0 && (p.getY() >= corTopY() || (p.verticalCollision && corVel.y > 0.05))) corVDir = -1;
 
-        // ---- movimento
+        // ---- lateral: fim da parede = canto (contorna a mina) ou, sem corredor adiante, inverte o lado
         double[] lr = latRange();
         double lat = latPos(p);
-        boolean moving = corVel.lengthSquared() > 0.003;
-        if (moving && p.horizontalCollision && corLegLeft > 0) {          // bateu de lado: inverte a diagonal
-            corDir = -corDir;
-            corLegLeft = 0;
-            corPause = 4 + RNG.nextInt(8);
+        int ws = latWorldSign();
+        if (corTurnTicks == 0) {
+            boolean blocked = (ws > 0 && lat >= lr[1]) || (ws < 0 && lat <= lr[0]) || lateralBlocked(mc, p, ws, s);
+            double moved = (lat - corLastLat) * ws;
+            corBlockedTicks = moved < s * 0.3 ? corBlockedTicks + 1 : 0;   // empacado de lado
+            if (corBlockedTicks >= 5) blocked = true;
+            if (blocked) {
+                if (!cornerTurn(mc, p)) corDir = -corDir;
+                ws = latWorldSign();
+                corTurnTicks = 8;
+                corBlockedTicks = 0;
+            }
         }
-        if (moving && p.verticalCollision && corLegLeft > 0 && Math.abs(corVel.y) > 0.04) {   // teto/chão: inverte
-            corVertHint = corVel.y > 0 ? -1 : 1;
-            corLegLeft = 0;
-            corPause = 3 + RNG.nextInt(6);
-        }
+        corLastLat = latPos(p);
 
-        Vec3d want = Vec3d.ZERO;
-        if (corPause > 0) {
-            corPause--;
-        } else {
-            if (corLegLeft <= 0) startCorridorLeg(p, lr);
-            corLegLeft--;
-            double u = 1.0 - (double) corLegLeft / corLegT;                  // 0..1 ao longo da pernada
-            double vy = (corYT - corY0) * 6.0 * u * (1.0 - u) / corLegT;     // sobe/desce em "S" (começa e termina devagar)
-            double vlat = corDir * corLatSpeed * (0.35 + 0.65 * Math.sin(Math.PI * u));
-            if (lr[1] - lr[0] < 0.01 || (vlat > 0 && lat >= lr[1]) || (vlat < 0 && lat <= lr[0])) vlat = 0;
-            if (p.getY() >= FarmConfig.maxY() + 1.5 && vy > 0) vy = 0;
-            if (p.getY() <= FarmConfig.minY() + 1.0 && vy < 0) vy = 0;
-
-            // distância da parede: se ela recuou (blocos quebrados), chega mais perto; se está colado, afasta
-            double vn = 0;
+        // ---- distância da parede: ela recua quando os blocos quebram; chega mais perto se ficou longe
+        double vn = 0;
+        if (corTurnTicks == 0 && mineCount > 0) {
             double dn = faceDistAhead(p);
             double pn = p.getX() * corNX + p.getZ() * corNZ;
             if (dn != Double.MAX_VALUE) {
-                if (dn > 3.2 && clearAhead(mc, p)) vn = 0.14;
-                else if (dn < 1.2 && pn > corN0 - 0.8) vn = -0.08;
+                if (dn > 3.2 && clearAhead(mc, p)) vn = s * 0.7;
+                else if (dn < 1.2 && pn > corN0 - 0.8) vn = -s * 0.4;
             }
-            want = corNX != 0 ? new Vec3d(corNX * vn, vy, vlat) : new Vec3d(vlat, vy, corNZ * vn);
         }
-        corVel = corVel.add(want.subtract(corVel).multiply(0.3));   // aceleração suave
-        if (corVel.lengthSquared() < 1.0e-5) corVel = Vec3d.ZERO;
+
+        double vlat = ws * s;
+        double vy = corVDir * s;
+        corVel = corNX != 0 ? new Vec3d(corNX * vn, vy, vlat) : new Vec3d(vlat, vy, corNZ * vn);
         p.setVelocity(corVel);
     }
 
