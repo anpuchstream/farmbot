@@ -37,6 +37,8 @@ public class FarmConfig {
     public static float mineFlySpeed = 1.5f;
     public static boolean replant = true;
     public static boolean areaSet = false;
+    /** Recorder: repete o replay em loop até apertar a tecla de novo. */
+    public static boolean recorderLoop = false;
     public static final int[] p1 = {0, 64, 0};
     public static final int[] p2 = {0, 64, 0};
     public static final Set<Crop> crops = EnumSet.of(Crop.WHEAT);
@@ -69,7 +71,7 @@ public class FarmConfig {
         String mode, task, mineZone;
         boolean replant, areaSet;
         // Boolean (objeto) para distinguir "ausente" de "false" em configs antigas
-        Boolean oresOnlyEC, oresOnlyPR, guardEnabled, alertSound;
+        Boolean oresOnlyEC, oresOnlyPR, guardEnabled, alertSound, recorderLoop;
         Float mineFlySpeed;
         List<String> crops;
     }
@@ -90,6 +92,7 @@ public class FarmConfig {
             d.oresOnlyPR = oresOnlyPR;
             d.guardEnabled = guardEnabled;
             d.alertSound = alertSound;
+            d.recorderLoop = recorderLoop;
             d.mineFlySpeed = mineFlySpeed;
             d.replant = replant;
             d.areaSet = areaSet;
@@ -118,6 +121,7 @@ public class FarmConfig {
             if (d.oresOnlyPR != null) oresOnlyPR = d.oresOnlyPR;
             if (d.guardEnabled != null) guardEnabled = d.guardEnabled;
             if (d.alertSound != null) alertSound = d.alertSound;
+            if (d.recorderLoop != null) recorderLoop = d.recorderLoop;
             if (d.mineFlySpeed != null) mineFlySpeed = Math.max(0.5f, Math.min(3.0f, d.mineFlySpeed));
             replant = d.replant;
             areaSet = d.areaSet;

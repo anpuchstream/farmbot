@@ -3,11 +3,15 @@ package com.farmbot;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.TextFieldWidget;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -23,7 +27,7 @@ public class FarmScreen extends Screen {
 
     // ---------------------------------------------------------------- abas / telas
     private enum Tab {
-        ALL("TUDO"), FARM("FARM"), EC("MODO EC"), PR("MODO PR"), SYSTEM("SISTEMA");
+        ALL("TUDO"), FARM("FARM"), EC("MODO EC"), PR("MODO PR"), SYSTEM("SISTEMA"), RECORDER("RECORDER");
         final String label;
         Tab(String label) { this.label = label; }
     }
@@ -83,11 +87,17 @@ public class FarmScreen extends Screen {
             new Card("guard", "Proteção", Items.SHIELD,
                     "Para o bot e avisa se o servidor reiniciar, se você for teleportado, se sair da área, se a ferramenta (machado/enxada/picareta) for trocada ou se você receber um mapa de CAPTCHA.",
                     Tab.ALL, Tab.SYSTEM),
+            new Card("recorder", "Recorder", Items.CLOCK,
+                    "Grava tudo o que você faz (andar, olhar, quebrar, usar itens) e repete quando você apertar a tecla de replay. Clique em OPÇÕES para escolher as teclas.",
+                    Tab.ALL),
             new Card("sound", "Alerta sonoro", Items.BELL,
                     "Toca o alarme (30 s) quando a proteção para o bot. Clique em OPÇÕES para testar o som.",
                     Tab.ALL, Tab.SYSTEM));
 
     private static final Map<Crop, ItemStack> CROP_ICONS = new EnumMap<>(Crop.class);
+    private static final ItemStack ICON_REC = new ItemStack(Items.REDSTONE);
+    private static final ItemStack ICON_PLAY = new ItemStack(Items.CLOCK);
+    private static final ItemStack ICON_TAPE = new ItemStack(Items.BOOK);
 
     // ---------------------------------------------------------------- cores
     private static final int C_DIM = 0xA0000000;
@@ -109,7 +119,8 @@ public class FarmScreen extends Screen {
 
     // ---------------------------------------------------------------- áreas clicáveis (refeitas a cada frame)
     private static final int H_TAB = 1, H_BACK = 2, H_TOGGLE = 3, H_OPTIONS = 4, H_CROP = 5, H_CAT = 6,
-            H_ALL = 7, H_NONE = 8, H_START = 9, H_CLOSE = 10, H_POS = 11;
+            H_ALL = 7, H_NONE = 8, H_START = 9, H_CLOSE = 10, H_POS = 11,
+            H_REC_KEY = 12, H_PLAY_KEY = 13, H_REC_BTN = 14, H_PLAY_BTN = 15, H_LOOP = 16, H_CLEAR = 17;
 
     private static final class Hit {
         final int x1, y1, x2, y2, kind, arg;
@@ -136,6 +147,8 @@ public class FarmScreen extends Screen {
     private float scroll, maxScroll;
     private String hoverTitle, hoverDesc;
     private long soundTestUntil;
+    /** Recorder: qual atalho está esperando uma tecla (0 = nenhum, 1 = gravar, 2 = replay). */
+    private int listening;
 
     private TextFieldWidget search;
     private final TextFieldWidget[] fields = new TextFieldWidget[6];
@@ -148,7 +161,7 @@ public class FarmScreen extends Screen {
 
     // ================================================================ init / layout
     private void layout() {
-        pw = Math.min(width - 12, 420);
+        pw = Math.min(width - 12, 460);
         ph = Math.min(height - 10, 262);
         px = (width - pw) / 2;
         py = (height - ph) / 2;
@@ -162,9 +175,10 @@ public class FarmScreen extends Screen {
     protected void init() {
         layout();
 
-        // busca (cabeçalho, à direita)
-        int sx = px + pw - 12 - 112;
-        search = new TextFieldWidget(textRenderer, sx + 8, py + 15, 96, 10, Text.literal("Buscar"));
+        // busca (cabeçalho, à direita; encolhe se as abas ocuparem o espaço)
+        int sw = Math.max(40, searchW());
+        int sx = px + pw - 12 - sw;
+        search = new TextFieldWidget(textRenderer, sx + 8, py + 15, sw - 16, 10, Text.literal("Buscar"));
         search.setDrawsBackground(false);
         search.setMaxLength(24);
         search.setText(searchText);
@@ -200,9 +214,28 @@ public class FarmScreen extends Screen {
 
     private void refreshVisibility() {
         boolean area = view == View.AREA;
-        search.visible = !area;
+        search.visible = searchShown();
         for (TextFieldWidget f : fields) f.visible = area;
         setFocused(null);
+    }
+
+    private int tabW(Tab t) { return textRenderer.getWidth(t.label) + 12; }
+
+    private int tabsEnd() {
+        int x = px + 12;
+        for (Tab t : Tab.values()) x += tabW(t) + 5;
+        return x - 5;
+    }
+
+    /** Largura que sobra para a busca ao lado das abas (máx. 112). */
+    private int searchW() {
+        return Math.min(112, (px + pw - 12) - (tabsEnd() + 8));
+    }
+
+    private boolean searchShown() {
+        if (view == View.AREA) return false;
+        if (view == View.MAIN && tab == Tab.RECORDER) return false;
+        return searchW() >= 40;
     }
 
     private void setView(View v) {
@@ -214,6 +247,8 @@ public class FarmScreen extends Screen {
     private void setTab(Tab t) {
         tab = t;
         scroll = 0;
+        listening = 0;
+        if (search != null) refreshVisibility();
     }
 
     // ================================================================ estado dos cards
@@ -236,6 +271,7 @@ public class FarmScreen extends Screen {
             case "speed": return true;
             case "guard": return FarmConfig.guardEnabled;
             case "sound": return FarmConfig.alertSound;
+            case "recorder": return Recorder.state() != Recorder.State.IDLE || Recorder.hasRecording();
             default: return false;
         }
     }
@@ -243,6 +279,11 @@ public class FarmScreen extends Screen {
     private static String statusLabel(String id, boolean on) {
         if (id.equals("area")) return on ? "DEFINIDA" : "SEM ÁREA";
         if (id.equals("speed")) return FarmConfig.mineFlySpeed + "X";
+        if (id.equals("recorder")) {
+            if (Recorder.state() == Recorder.State.RECORDING) return "GRAVANDO";
+            if (Recorder.state() == Recorder.State.PLAYING) return "REPRODUZINDO";
+            return on ? "PRONTO" : "VAZIO";
+        }
         return on ? "ATIVADO" : "DESATIVADO";
     }
 
@@ -292,6 +333,7 @@ public class FarmScreen extends Screen {
             case "farm":
             case "area":
             case "sound":
+            case "recorder":
                 return true;
             case "ec": return tab != Tab.EC;
             case "pr": return tab != Tab.PR;
@@ -305,6 +347,7 @@ public class FarmScreen extends Screen {
             case "area": setView(View.AREA); break;
             case "ec": setTab(Tab.EC); break;
             case "pr": setTab(Tab.PR); break;
+            case "recorder": setTab(Tab.RECORDER); break;
             case "sound":
                 if (client != null) { FarmBot.testAlert(client); soundTestUntil = System.currentTimeMillis() + 2500; }
                 break;
@@ -440,7 +483,7 @@ public class FarmScreen extends Screen {
             text(c, view == View.CROPS ? "PLANTAS DO FARM" : "ÁREA DE TRABALHO", x + bw + 10, y + 5, C_MUTED);
         } else {
             for (Tab t : Tab.values()) {
-                int w = textRenderer.getWidth(t.label) + 16;
+                int w = tabW(t);
                 boolean sel = t == tab;
                 boolean h = in(mx, my, x, y, w, 18);
                 rrBorder(c, x, y, w, 18, sel ? 0xFF6FA0FF : C_CARD_BORDER, sel ? C_BLUE : (h ? 0xFF2F3A5C : C_BLUE_DARK));
@@ -450,9 +493,10 @@ public class FarmScreen extends Screen {
             }
         }
 
-        if (view != View.AREA) {
-            int sx = px + pw - 12 - 112;
-            rrBorder(c, sx, y, 112, 18, search.isFocused() ? C_BLUE : C_CARD_BORDER, C_OPT);
+        if (searchShown()) {
+            int sw = Math.max(40, searchW());
+            int sx = px + pw - 12 - sw;
+            rrBorder(c, sx, y, sw, 18, search.isFocused() ? C_BLUE : C_CARD_BORDER, C_OPT);
             if (searchText.isEmpty() && !search.isFocused()) text(c, "Buscar...", sx + 8, y + 5, 0xFF566079);
         }
     }
@@ -461,6 +505,12 @@ public class FarmScreen extends Screen {
     private void drawMain(DrawContext c, int mx, int my) {
         clipY1 = gy;
         clipY2 = gy + gh;
+        if (tab == Tab.RECORDER) {
+            maxScroll = 0;
+            scroll = 0;
+            drawRecorder(c, mx, my);
+            return;
+        }
         List<Card> list = visibleCards();
         int cw = (gw - GAP * (COLS - 1)) / COLS, ch = 74;
         int rows = (list.size() + COLS - 1) / COLS;
@@ -633,6 +683,115 @@ public class FarmScreen extends Screen {
         text(c, "O EC aceita blocos até 2 abaixo do Y mínimo (pode marcar voando logo acima do chão).", gx, gy + 152, C_MUTED);
     }
 
+    // ---------------------------------------------------------------- aba RECORDER
+    private void drawRecorder(DrawContext c, int mx, int my) {
+        Recorder.State st = Recorder.state();
+        boolean recording = st == Recorder.State.RECORDING;
+        boolean playing = st == Recorder.State.PLAYING;
+
+        // --- gravar
+        recorderCard(c, mx, my, gy, ICON_REC, "GRAVAR MOVIMENTOS",
+                "Grava andar, câmera, quebrar e usar itens, até você parar.",
+                FarmBotClient.recordKey, 1,
+                recording ? "■ PARAR" : "● GRAVAR", recording, H_REC_KEY, H_REC_BTN,
+                recording ? "§c● GRAVANDO " + Recorder.secs(Recorder.liveFrames()) + " s" : null);
+
+        // --- replay
+        recorderCard(c, mx, my, gy + 62, ICON_PLAY, "REPRODUZIR (REPLAY)",
+                "Repete o que foi gravado, a partir de onde você está.",
+                FarmBotClient.replayKey, 2,
+                playing ? "■ PARAR" : "▶ REPLAY", playing, H_PLAY_KEY, H_PLAY_BTN,
+                playing ? "§a▶ " + Recorder.progressPercent() + "%" : null);
+
+        // --- gravação atual
+        int y0 = gy + 124;
+        rrBorder(c, gx, y0, gw, 56, C_CARD_BORDER, C_CARD);
+        drawIcon(c, ICON_TAPE, gx + 8, y0 + 8, 1.5f);
+        text(c, "GRAVAÇÃO ATUAL", gx + 40, y0 + 7, C_TEXT);
+        String info;
+        if (Recorder.hasRecording()) {
+            Vec3d sp = Recorder.startPos();
+            info = Recorder.frameCount() + " ticks  |  " + Recorder.secs(Recorder.frameCount()) + " s  |  início: X "
+                    + (int) Math.floor(sp.x) + "  Y " + (int) Math.floor(sp.y) + "  Z " + (int) Math.floor(sp.z);
+        } else {
+            info = "Nenhuma gravação ainda.";
+        }
+        text(c, textRenderer.trimToWidth(info, gw - 50), gx + 40, y0 + 19, Recorder.hasRecording() ? 0xFF88FF88 : C_MUTED);
+
+        int by = y0 + 32, bh = 18;
+        boolean loop = FarmConfig.recorderLoop;
+        int lw = 150;
+        boolean lh = in(mx, my, gx + 40, by, lw, bh);
+        rrBorder(c, gx + 40, by, lw, bh, C_CARD_BORDER, loop ? (lh ? C_GREEN_H : C_GREEN) : (lh ? C_RED_H : C_RED));
+        ctext(c, "LOOP: " + (loop ? "ATIVADO" : "DESATIVADO"), gx + 40 + lw / 2, by + 5, C_TEXT);
+        hit(gx + 40, by, lw, bh, H_LOOP, 0);
+
+        int cw = 110, cx = gx + 40 + lw + 8;
+        boolean can = Recorder.hasRecording() && st == Recorder.State.IDLE;
+        boolean ch = can && in(mx, my, cx, by, cw, bh);
+        rrBorder(c, cx, by, cw, bh, C_CARD_BORDER, can ? (ch ? C_RED_H : C_RED) : 0xFF101320);
+        ctext(c, "APAGAR", cx + cw / 2, by + 5, can ? C_TEXT : 0xFF566079);
+        if (can) hit(cx, by, cw, bh, H_CLEAR, 0);
+
+        int tx = cx + cw + 8;
+        text(c, textRenderer.trimToWidth("Repete sem parar.", gx + gw - 8 - tx), tx, by + 5, C_MUTED);
+    }
+
+    /** Cartão de um atalho do Recorder: título, descrição, botão da tecla e botão de ação. */
+    private void recorderCard(DrawContext c, int mx, int my, int y0, ItemStack icon, String title, String desc,
+                              KeyBinding kb, int which, String btnLabel, boolean active,
+                              int keyKind, int btnKind, String status) {
+        rrBorder(c, gx, y0, gw, 56, C_CARD_BORDER, C_CARD);
+        drawIcon(c, icon, gx + 8, y0 + 8, 1.5f);
+        text(c, title, gx + 40, y0 + 7, C_TEXT);
+        text(c, textRenderer.trimToWidth(desc, gw - 50), gx + 40, y0 + 19, C_MUTED);
+        if (status != null) {
+            int w = textRenderer.getWidth(status.replaceAll("§.", ""));
+            text(c, status, gx + gw - 8 - w, y0 + 7, C_TEXT);
+        }
+
+        // botão da tecla de atalho
+        int kx = gx + 40, ky = y0 + 32, kw = 120, kh = 18;
+        boolean wait = listening == which;
+        boolean kh2 = in(mx, my, kx, ky, kw, kh);
+        rrBorder(c, kx, ky, kw, kh, wait ? 0xFF6FA0FF : C_CARD_BORDER, wait ? C_BLUE : (kh2 ? C_OPT_H : C_OPT));
+        ctext(c, wait ? "Pressione uma tecla..." : "Tecla: " + Recorder.keyName(kb), kx + kw / 2, ky + 5, C_TEXT);
+        hit(kx, ky, kw, kh, keyKind, 0);
+
+        // botão de ação (gravar/parar, replay/parar)
+        int bw = 110, bx = gx + gw - 8 - bw;
+        boolean bh2 = in(mx, my, bx, ky, bw, kh);
+        rrBorder(c, bx, ky, bw, kh, C_CARD_BORDER, active ? (bh2 ? C_RED_H : C_RED) : (bh2 ? C_GREEN_H : C_GREEN));
+        ctext(c, btnLabel, bx + bw / 2, ky + 5, C_TEXT);
+        hit(bx, ky, bw, kh, btnKind, 0);
+
+        // dica / conflito, no espaço entre os dois botões
+        int ix = kx + kw + 8, iw = bx - 6 - ix;
+        if (wait) {
+            text(c, textRenderer.trimToWidth("ESC cancela | BACKSPACE limpa", iw), ix, ky + 5, 0xFFFFD866);
+        } else {
+            String other = conflictName(kb);
+            if (other != null) text(c, textRenderer.trimToWidth("Conflito: " + other, iw), ix, ky + 5, 0xFFFF6B6B);
+        }
+    }
+
+    /** Nome de outro atalho do jogo que usa a mesma tecla (null = sem conflito). */
+    private String conflictName(KeyBinding kb) {
+        if (client == null || kb == null || "key.keyboard.unknown".equals(kb.getBoundKeyTranslationKey())) return null;
+        for (KeyBinding o : client.options.allKeys) {
+            if (o != kb && o.getBoundKeyTranslationKey().equals(kb.getBoundKeyTranslationKey())) {
+                return Text.translatable(o.getTranslationKey()).getString();
+            }
+        }
+        return null;
+    }
+
+    private void bindKey(KeyBinding kb, InputUtil.Key key) {
+        kb.setBoundKey(key);
+        KeyBinding.updateKeysByCode();
+        if (client != null) client.options.write();
+    }
+
     // ---------------------------------------------------------------- rodapé
     private void drawFooter(DrawContext c, int mx, int my) {
         int fy = py + ph - 28;
@@ -658,6 +817,11 @@ public class FarmScreen extends Screen {
     }
 
     private String statusLine() {
+        if (view == View.MAIN && tab == Tab.RECORDER) {
+            String s = "Recorder  |  " + (Recorder.hasRecording() ? Recorder.secs(Recorder.frameCount()) + " s gravados" : "sem gravação");
+            s += "  |  " + Recorder.keyName(FarmBotClient.recordKey) + " grava, " + Recorder.keyName(FarmBotClient.replayKey) + " replay";
+            return s;
+        }
         boolean farm = FarmConfig.task == FarmConfig.Task.FARM;
         String s = farm ? "Farm" : "Modo " + FarmConfig.mineZone;
         s += "  |  Volume: " + FarmConfig.volume();
@@ -695,6 +859,12 @@ public class FarmScreen extends Screen {
     // ================================================================ entrada
     @Override
     public boolean mouseClicked(double mx, double my, int button) {
+        if (listening != 0) {   // esperando uma tecla/botão para o atalho do Recorder
+            KeyBinding kb = listening == 1 ? FarmBotClient.recordKey : FarmBotClient.replayKey;
+            listening = 0;
+            if (button >= 2) bindKey(kb, InputUtil.Type.MOUSE.createFromCode(button));   // botão do meio / laterais
+            return true;                                                                  // esquerdo/direito = cancela
+        }
         if (super.mouseClicked(mx, my, button)) return true;   // campos de texto (busca e coordenadas)
         if (button != 0) return false;
         for (int i = hits.size() - 1; i >= 0; i--) {
@@ -705,6 +875,18 @@ public class FarmScreen extends Screen {
             return true;
         }
         return false;
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (listening != 0) {
+            KeyBinding kb = listening == 1 ? FarmBotClient.recordKey : FarmBotClient.replayKey;
+            listening = 0;
+            if (keyCode == GLFW.GLFW_KEY_ESCAPE) return true;   // cancela sem fechar a tela
+            bindKey(kb, keyCode == GLFW.GLFW_KEY_BACKSPACE ? InputUtil.UNKNOWN_KEY : InputUtil.fromKeyCode(keyCode, scanCode));
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     @Override
@@ -725,6 +907,7 @@ public class FarmScreen extends Screen {
             case H_TOGGLE: {
                 String id = CARDS.get(h.arg).id;
                 if (id.equals("area")) setView(View.AREA);
+                else if (id.equals("recorder")) setTab(Tab.RECORDER);
                 else toggleCard(id);
                 break;
             }
@@ -761,6 +944,36 @@ public class FarmScreen extends Screen {
                 fields[h.arg * 3 + 2].setText(String.valueOf(bp.getZ()));
                 break;
             }
+            case H_REC_KEY:
+                listening = listening == 1 ? 0 : 1;
+                break;
+            case H_PLAY_KEY:
+                listening = listening == 2 ? 0 : 2;
+                break;
+            case H_REC_BTN:
+                if (client == null) break;
+                if (Recorder.state() == Recorder.State.RECORDING) {
+                    Recorder.stopRecording(client);
+                } else {
+                    Recorder.startRecording(client);
+                    if (Recorder.state() == Recorder.State.RECORDING) close();   // fecha o menu para você poder jogar
+                }
+                break;
+            case H_PLAY_BTN:
+                if (client == null) break;
+                if (Recorder.state() == Recorder.State.PLAYING) {
+                    Recorder.stopPlayback(client, "§eReplay interrompido.");
+                } else {
+                    Recorder.startPlayback(client);
+                    if (Recorder.state() == Recorder.State.PLAYING) close();
+                }
+                break;
+            case H_LOOP:
+                FarmConfig.recorderLoop = !FarmConfig.recorderLoop;
+                break;
+            case H_CLEAR:
+                if (client != null) Recorder.clear(client);
+                break;
             default:
                 break;
         }

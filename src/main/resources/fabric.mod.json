@@ -3,7 +3,7 @@
   "id": "farmbot",
   "version": "${version}",
   "name": "Farm Bot",
-  "description": "Farm automático em área demarcada: trigo, cenoura, batata e mais. Corre (ou voa) de forma humanizada, com câmera suave.",
+  "description": "Farm automático em área demarcada: trigo, cenoura, batata e mais. Corre (ou voa) de forma humanizada, com câmera suave. Inclui o Recorder: grava seus movimentos e repete com uma tecla.",
   "authors": ["Você"],
   "license": "MIT",
   "environment": "client",

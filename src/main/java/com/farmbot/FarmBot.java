@@ -116,6 +116,7 @@ public class FarmBot {
             msg(mc, "§cÁrea grande demais (" + columns() + " colunas X*Z, máx " + MAX_COLUMNS_MINE + ").");
             return;
         }
+        Recorder.cancelAll(mc);   // o Recorder não pode brigar com o bot pelo controle do jogador
         ready.clear();
         replantQueue.clear();
         mineCandidates.clear();
@@ -180,6 +181,11 @@ public class FarmBot {
     private static void alert() {
         if (!FarmConfig.alertSound) return;
         alertPending = true;
+    }
+
+    /** Dispara o alarme da proteção (usado também pelo Recorder). */
+    public static void raiseAlert() {
+        alert();
     }
 
     /** Botão de teste do menu: toca o alarme (ignora a opção ligado/desligado). */

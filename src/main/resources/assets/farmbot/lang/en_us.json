@@ -1,5 +1,7 @@
 {
   "key.farmbot.open": "Open Farm Bot menu",
   "key.farmbot.toggle": "Toggle Farm Bot",
-  "category.farmbot": "Farm Bot"
+  "category.farmbot": "Farm Bot",
+  "key.farmbot.record": "Recorder: start/stop recording",
+  "key.farmbot.replay": "Recorder: replay recording"
 }
