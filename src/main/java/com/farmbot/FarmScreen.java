@@ -81,10 +81,10 @@ public class FarmScreen extends Screen {
                     "Dois cantos (X Y Z) que delimitam o trabalho. No EC cubra o plano; no PR cubra o poço do topo ao fundo.",
                     Tab.ALL, Tab.FARM, Tab.EC, Tab.PR, Tab.SYSTEM),
             new Card("guard", "Proteção", Items.SHIELD,
-                    "Para o bot e avisa se o servidor reiniciar, se você for teleportado ou se sair da área demarcada.",
+                    "Para o bot e avisa se o servidor reiniciar, se você for teleportado, se sair da área, se a ferramenta (machado/enxada/picareta) for trocada ou se você receber um mapa de CAPTCHA.",
                     Tab.ALL, Tab.SYSTEM),
             new Card("sound", "Alerta sonoro", Items.BELL,
-                    "Toca um sino 3 vezes quando a proteção para o bot. Em OPÇÕES você testa o som.",
+                    "Toca um sino 5 vezes quando a proteção para o bot. Clique em OPÇÕES para testar o som.",
                     Tab.ALL, Tab.SYSTEM));
 
     private static final Map<Crop, ItemStack> CROP_ICONS = new EnumMap<>(Crop.class);
@@ -135,6 +135,7 @@ public class FarmScreen extends Screen {
     private int clipY1, clipY2;      // faixa vertical onde os itens rolados são clicáveis
     private float scroll, maxScroll;
     private String hoverTitle, hoverDesc;
+    private long soundTestUntil;
 
     private TextFieldWidget search;
     private final TextFieldWidget[] fields = new TextFieldWidget[6];
@@ -304,7 +305,9 @@ public class FarmScreen extends Screen {
             case "area": setView(View.AREA); break;
             case "ec": setTab(Tab.EC); break;
             case "pr": setTab(Tab.PR); break;
-            case "sound": if (client != null) FarmBot.testAlert(client); break;
+            case "sound":
+                if (client != null) { FarmBot.testAlert(client); soundTestUntil = System.currentTimeMillis() + 2500; }
+                break;
             default: break;
         }
     }
@@ -415,8 +418,15 @@ public class FarmScreen extends Screen {
         drawFooter(ctx, mx, my);
 
         super.render(ctx, mx, my, delta);   // campos de texto por cima do painel
+        if (System.currentTimeMillis() < soundTestUntil) {
+            ctext(ctx, "♪ Tocando o alerta sonoro... (sem ouvir? veja o volume Principal/Master do jogo)", width / 2, py + ph + 6, 0xFFFFD866);
+        }
         if (hoverDesc != null) drawTip(ctx, mx, my, hoverTitle, hoverDesc);
     }
+
+    /** Não pausa o jogo: em mundo single-player a pausa silenciava o som de teste. */
+    @Override
+    public boolean shouldPause() { return false; }
 
     // ---------------------------------------------------------------- cabeçalho
     private void drawHeader(DrawContext c, int mx, int my) {

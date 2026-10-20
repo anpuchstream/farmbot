@@ -164,8 +164,8 @@ public class FarmBot {
     private static boolean guardWasInside;
 
     // --- alerta sonoro ---
-    private static final int ALERT_REPEATS = 3;     // quantos toques de sino
-    private static final int ALERT_INTERVAL = 12;   // ticks entre os toques (~0,6 s)
+    private static final int ALERT_REPEATS = 5;     // quantos toques
+    private static final int ALERT_INTERVAL = 8;    // ticks entre os toques (~0,4 s)
     private static int alertLeft, alertDelay;
 
     /** Para o bot por um motivo da proteção e dispara o som de alerta. */
@@ -180,19 +180,78 @@ public class FarmBot {
         alertDelay = 0;
     }
 
-    /** Toca um toque do alerta (botão de teste do menu). */
+    /** Botão de teste do menu: toca o alerta completo (ignora a opção ligado/desligado). */
     public static void testAlert(MinecraftClient mc) {
-        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_BELL_USE, 1.0f, 1.0f));
+        alertLeft = ALERT_REPEATS;
+        alertDelay = 0;
+        tickAlert(mc);   // o primeiro toque sai na hora, sem esperar o próximo tick
     }
 
-    /** Toca os toques pendentes do alerta. Roda todo tick, mesmo com o bot desligado. */
+    /** Um toque: sino + nota alta, sem posição (relativo ao jogador), volume cheio. */
+    private static void playAlertTone(MinecraftClient mc) {
+        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_BELL_USE, 1.0f, 1.0f));
+        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_NOTE_BLOCK_PLING.value(), 1.5f, 1.0f));
+    }
+
+    /** Toca os toques pendentes do alerta. Roda todo tick, mesmo com o bot desligado ou em menus. */
     private static void tickAlert(MinecraftClient mc) {
         if (alertLeft <= 0) return;
         if (alertDelay > 0) { alertDelay--; return; }
-        // categoria MASTER, sem posição: toca no volume cheio, mesmo em tela de menu/carregamento
-        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_BELL_USE, 1.0f, 1.0f));
+        playAlertTone(mc);
         alertLeft--;
         alertDelay = ALERT_INTERVAL;
+    }
+
+    // ------------------------------------------------------------------
+    //  PROTEÇÃO EXTRA: ferramenta trocada / mapa de captcha
+    // ------------------------------------------------------------------
+    private static final int TOOL_MISMATCH_TICKS = 3;   // tolera falha de sincronização do inventário
+    private static final Item[] toolSnap = new Item[9]; // ferramenta de cada slot da hotbar ao ligar
+    private static final int[] toolBad = new int[9];
+    private static int mapBaseline;
+
+    private static boolean isGuardTool(ItemStack s) {
+        return !s.isEmpty() && (s.isIn(ItemTags.AXES) || s.isIn(ItemTags.HOES)
+                || s.isIn(ItemTags.PICKAXES) || s.isIn(ItemTags.SHOVELS));
+    }
+
+    private static int countMaps(ClientPlayerEntity p) {
+        int n = 0;
+        for (int i = 0; i < p.getInventory().size(); i++) {
+            if (p.getInventory().getStack(i).isOf(Items.FILLED_MAP)) n++;
+        }
+        return n;
+    }
+
+    private static void snapshotItems(ClientPlayerEntity p) {
+        for (int i = 0; i < 9; i++) {
+            ItemStack st = p.getInventory().getStack(i);
+            toolSnap[i] = isGuardTool(st) ? st.getItem() : null;
+            toolBad[i] = 0;
+        }
+        mapBaseline = countMaps(p);
+    }
+
+    /** @return true se tudo certo; false se o bot foi parado por ferramenta trocada ou mapa de captcha. */
+    private static boolean itemGuard(MinecraftClient mc, ClientPlayerEntity p) {
+        // 1) Recebeu um mapa (captcha em mapa) ou está segurando um na mão
+        if (countMaps(p) > mapBaseline
+                || p.getMainHandStack().isOf(Items.FILLED_MAP) && mapBaseline == 0
+                || p.getOffHandStack().isOf(Items.FILLED_MAP) && mapBaseline == 0) {
+            guardStop(mc, "§cFarm Bot parado: você recebeu um mapa (possível CAPTCHA)! Resolva-o.");
+            return false;
+        }
+        // 2) A ferramenta de algum slot foi trocada por outra coisa (ou sumiu)
+        for (int i = 0; i < 9; i++) {
+            if (toolSnap[i] == null) continue;
+            ItemStack st = p.getInventory().getStack(i);
+            if (st.isOf(toolSnap[i])) { toolBad[i] = 0; continue; }
+            if (++toolBad[i] >= TOOL_MISMATCH_TICKS) {
+                guardStop(mc, "§cFarm Bot parado: a ferramenta do slot " + (i + 1) + " foi trocada ou sumiu.");
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Guarda a "foto" do estado no momento em que o bot é ligado. */
@@ -201,6 +260,7 @@ public class FarmBot {
         guardWorld = mc.world;
         guardPos = mc.player.getPos();
         guardWasInside = nearArea(guardPos);
+        snapshotItems(mc.player);
     }
 
     private static boolean nearArea(Vec3d v) {
@@ -226,6 +286,9 @@ public class FarmBot {
             return false;
         }
         guardPos = pos;
+
+        // 2b) Ferramenta trocada / mapa de captcha
+        if (!itemGuard(mc, p)) return false;
 
         // 3) Fora da área demarcada. Só vale depois de já ter estado dentro, para não
         //    desligar o bot se você ligar de longe e ele ainda estiver indo até a área.
