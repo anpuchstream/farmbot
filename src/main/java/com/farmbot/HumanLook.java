@@ -65,6 +65,19 @@ public final class HumanLook {
         apply(p);
     }
 
+    /** Velocidade angular atual do yaw (graus/tick). Usada para prever o arco das curvas. */
+    public static float yawVelocity() {
+        return yawVel;
+    }
+
+    /**
+     * Um passo da dinâmica do yaw SEM balanço: dado o erro até o alvo, devolve a nova velocidade angular.
+     * É a mesma regra do step(), para o bot simular a curva antes de fazê-la.
+     */
+    public static float simYawVel(float vel, float err) {
+        return approach(vel, MathHelper.clamp(err * GAIN, -MAX_YAW_SPEED, MAX_YAW_SPEED), YAW_ACCEL);
+    }
+
     private static void apply(ClientPlayerEntity p) {
         p.setYaw(p.getYaw() + yawVel);
         p.setPitch(MathHelper.clamp(p.getPitch() + pitchVel, -90f, 90f));

@@ -68,7 +68,6 @@ public class FarmBot {
     private static int mineCount = 0;
     private static boolean flyBoosted;                  // velocidade de voo do jogador alterada pela mineração
     private static float origFlySpeed = 0.05f;
-    private static int brakeTicks;                      // ticks de freio ativo depois de virar na borda
     private static int mineTopY = Integer.MIN_VALUE;   // Y do bloco mais alto achado no último scan (altura do voo)
     private static BlockPos slowPos;                    // bloco lento em quebra (detecta bloco protegido)
     private static int slowTicks;
@@ -125,7 +124,6 @@ public class FarmBot {
         mineTopY = Integer.MIN_VALUE;
         slowPos = null;
         slowTicks = 0;
-        brakeTicks = 0;
         breakCount.clear();
         target = null; targetBlock = null; lastCheckPos = null; aimPoint = null;
         cmdVel = Vec3d.ZERO;
@@ -133,6 +131,7 @@ public class FarmBot {
         scanTimer = 0; cooldown = 0; statusTimer = 0; warnedFly = false; warnedHunger = false;
         forwardTicks = 0; breakingSlow = false; headingTicks = 0; rightClickCooldown = 0;
         heading = mc.player.getYaw();
+        mineSlow = 1.0;
         HumanLook.reset();
         armGuard(mc);
         FarmConfig.enabled = true;
@@ -293,9 +292,8 @@ public class FarmBot {
         if (++statusTimer >= 40) { statusTimer = 0; reportStatus(mc); }
 
         if (mining) {
-            boolean holdForBreak = breakingSlow;   // veio do tick anterior
             breakingSlow = false;
-            runMine(mc, p, holdForBreak);          // voo (W + sprint) com a câmera olhando para baixo
+            runMine(mc, p);                        // voo contínuo (W + sprint) com a câmera olhando para baixo
             mineAct(mc, p);                        // quebra o que estiver sob a mira, TODO tick
         } else {
             boolean holdForBreak = breakingSlow;   // veio do tick anterior
@@ -652,17 +650,94 @@ public class FarmBot {
     }
 
     /**
-     * Distância da borda em que o rumo é trocado. Cresce com a velocidade, porque o voo desliza
-     * (~2 blocos de frenagem por bloco/tick) e passar da folga da área dispara a proteção.
+     * Fator medido em simulação da câmera (HumanLook, 18°/tick máx) com a velocidade acompanhando a
+     * câmera: numa curva de 90° o bot ainda avança ~6,5 x velocidade (blocos/tick) no rumo antigo
+     * antes de curvar de vez. Usamos 8 para cobrir cantos (duas paredes ao mesmo tempo).
      */
-    private static double mineTrigger() {
-        return Math.max(wallTrigger(), 2.4 * FarmConfig.mineFlySpeed);
+    private static final double TURN_ADVANCE = 8.0;
+    /** Folga extra: balanço da câmera + 1 tick de atraso. */
+    private static final double TURN_MARGIN = 1.5;
+    /** Teto absoluto de velocidade de voo na mineração (blocos/tick; 1.5 = 30 blocos/s). */
+    private static final double MAX_MINE_SPEED = 1.5;
+    /** Multiplicador de segurança (0.25–1): freio de emergência quando nenhum arco cabe na área. */
+    private static double mineSlow = 1.0;
+
+    /** Velocidade horizontal atual (blocos/tick). */
+    private static double flatSpeed(ClientPlayerEntity p) {
+        Vec3d v = p.getVelocity();
+        return Math.hypot(v.x, v.z);
     }
 
-    /** Velocidade vertical (paira na altura certa) e horizontal (damp < 1 = freio ativo). */
-    private static void applyFlightVelocity(ClientPlayerEntity p, double damp) {
-        Vec3d v = p.getVelocity();
-        p.setVelocity(v.x * damp, MathHelper.clamp((mineHoverY() - p.getY()) * 0.35, -0.5, 0.5), v.z * damp);
+    /**
+     * Velocidade máxima de voo (blocos/tick) para a área: o arco de curva precisa caber nela, senão em
+     * área pequena o bot passaria da borda. Área grande = só vale o teto e o multiplicador do menu.
+     */
+    private static double mineSpeedCap() {
+        double cap = (0.28 * areaMinSide() - TURN_MARGIN) / TURN_ADVANCE;
+        return MathHelper.clamp(cap, 0.15, MAX_MINE_SPEED) * mineSlow;
+    }
+
+    /** Velocidade terminal prevista do voo com W + sprint (vanilla ~1.0 bloco/tick por 1.0x). */
+    private static double terminalSpeed() {
+        float base = flyBoosted ? origFlySpeed : 0.05f;
+        return 1.02 * (base / 0.05) * FarmConfig.mineFlySpeed;
+    }
+
+    /** Velocidade usada para prever curvas: a que o bot terá ao longo do arco (ainda acelerando). */
+    private static double simSpeed(ClientPlayerEntity p) {
+        return Math.min(mineSpeedCap(), Math.max(flatSpeed(p), terminalSpeed()));
+    }
+
+    /** Distância livre à frente que o bot precisa ter para fazer uma curva sem passar da borda. */
+    private static double turnNeed(double sp) {
+        return TURN_ADVANCE * (sp + 0.15) + TURN_MARGIN;
+    }
+
+    /** Velocidade vertical que paira na altura certa da superfície. */
+    private static double hoverVy(ClientPlayerEntity p) {
+        return MathHelper.clamp((mineHoverY() - p.getY()) * 0.35, -0.5, 0.5);
+    }
+
+    /**
+     * A velocidade acompanha a câmera: mantém a rapidez, mas aponta sempre para onde o jogador olha.
+     * Sem isso o voo desliza de lado quando o yaw gira (inércia do voo). Com isso, as curvas viram
+     * arcos suaves, sem soltar o W nem frear. Chamar DEPOIS de girar a câmera no tick.
+     */
+    private static void steerFlight(ClientPlayerEntity p) {
+        double s = Math.min(flatSpeed(p), mineSpeedCap());
+        float yaw = p.getYaw();
+        p.setVelocity(dirX(yaw) * s, hoverVy(p), dirZ(yaw) * s);
+    }
+
+    /** Distância (blocos) do ponto até a borda mais próxima da área, já descontada a margem de borda. */
+    private static double edgeDist(double x, double z) {
+        double sx = FarmConfig.maxX() + 1 - FarmConfig.minX();
+        double sz = FarmConfig.maxZ() + 1 - FarmConfig.minZ();
+        double mx = Math.min(EDGE_MARGIN, sx / 3.0), mz = Math.min(EDGE_MARGIN, sz / 3.0);
+        return Math.min(Math.min(x - (FarmConfig.minX() + mx), FarmConfig.maxX() + 1 - mx - x),
+                Math.min(z - (FarmConfig.minZ() + mz), FarmConfig.maxZ() + 1 - mz - z));
+    }
+
+    /**
+     * Simula a curva até o rumo {@code target} (mesma dinâmica da câmera, velocidade seguindo o yaw).
+     *
+     * @return {menor distância até a borda durante o arco, espaço livre à frente quando a curva termina}
+     */
+    private static double[] arcOutcome(ClientPlayerEntity p, float target, double sp) {
+        float yaw = p.getYaw();
+        float vel = HumanLook.yawVelocity();
+        double x = p.getX(), z = p.getZ();
+        double m = edgeDist(x, z);
+        for (int i = 0; i < 60; i++) {
+            float err = MathHelper.wrapDegrees(target - yaw);
+            if (Math.abs(err) < 2f && Math.abs(vel) < 1f) break;
+            vel = HumanLook.simYawVel(vel, err);
+            yaw += vel;
+            x += dirX(yaw) * sp;
+            z += dirZ(yaw) * sp;
+            m = Math.min(m, edgeDist(x, z));
+        }
+        return new double[] { m, freeDist(x, z, target, EDGE_MARGIN) };
     }
 
     /** Y (índice do bloco) da superfície que está sendo minerada. */
@@ -696,18 +771,17 @@ public class FarmBot {
     /**
      * Escolhe um novo rumo de voo, preferindo o que passa por mais blocos ainda não minerados
      * e, quando o entorno já está limpo, o que vai em direção aos blocos que restam.
+     * Só aceita rumos cujo ARCO de curva (simulado) cabe dentro da área.
      * mode 0 = troca normal; 1 = chegando na borda; 2 = travou em algo.
      */
     private static void newMineHeading(MinecraftClient mc, ClientPlayerEntity p, int mode) {
         final double px = p.getX(), pz = p.getZ();
-        double trig = mineTrigger();
+        final double sp = simSpeed(p);
+        final double need = turnNeed(sp);
         float cur = heading;
-        float best = cur;
-        double bestScore = -1.0e9;
 
         List<Float> options = new ArrayList<>();
-        int tries = mode == 0 ? 8 : 16;
-        for (int i = 0; i < tries; i++) {
+        for (int i = 0; i < 16; i++) {
             float turn;
             if (mode == 0) {
                 float mag = RNG.nextInt(100) < 70 ? 10f + RNG.nextFloat() * 35f : 60f + RNG.nextFloat() * 40f;
@@ -733,23 +807,29 @@ public class FarmBot {
             if (++added >= 3) break;
         }
 
+        float best = cur, fallback = cur;
+        double bestScore = -1.0e9, fallbackMargin = -1.0e9;
+        boolean found = false;
         for (float yaw : options) {
-            if (freeDist(px, pz, yaw, EDGE_MARGIN) < trig + 1.0) continue;   // bate na borda
+            double[] o = arcOutcome(p, yaw, sp);
+            if (o[0] > fallbackMargin) { fallbackMargin = o[0]; fallback = yaw; }
+            if (o[0] < 0.2 || o[1] < 0.6 * need + 1.0) continue;   // o arco passa da borda / não sobra espaço
             float turn = MathHelper.wrapDegrees(yaw - cur);
             double score = minableAlong(mc, px, pz, yaw) + RNG.nextDouble() * 1.5 - Math.abs(turn) / 45.0;
-            if (score > bestScore) { bestScore = score; best = yaw; }
+            if (score > bestScore) { bestScore = score; best = yaw; found = true; }
         }
-        if (bestScore < -500) {   // nenhum rumo serve: vai em direção ao centro da área
-            double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
-            double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
-            best = yawOf(cx - px, cz - pz);
-        }
-        heading = best;
-        headingTicks = 20 + RNG.nextInt(21);   // reavalia a cada 1–2 s, seguindo o que sobrou
-        if (mode >= 1) brakeTicks = 8;         // virou por causa da borda/trava: freia para não deslizar para fora
+        if (found) {
+            heading = best;
+            mineSlow = Math.min(1.0, mineSlow + 0.05);
+        } else if (mode >= 1) {
+            // nenhum arco cabe: pega o que mais se afasta da borda e FREIA a velocidade (mantendo W + sprint)
+            heading = fallback;
+            mineSlow = Math.max(0.25, mineSlow * 0.6);
+        }   // mode 0 sem opção válida: mantém o rumo atual (ele já está seguro)
+        headingTicks = 40 + RNG.nextInt(31);   // reavalia a cada 2–3,5 s (dá tempo de completar o arco)
     }
 
-    private static void runMine(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
+    private static void runMine(MinecraftClient mc, ClientPlayerEntity p) {
         if (!p.getAbilities().flying) {
             p.getAbilities().flying = true;
             p.sendAbilitiesUpdate();
@@ -759,7 +839,8 @@ public class FarmBot {
 
         // mina vazia: paira (freando) olhando para baixo, esperando regenerar
         if (mineCount == 0) {
-            applyFlightVelocity(p, 0.6);
+            Vec3d v = p.getVelocity();
+            p.setVelocity(v.x * 0.6, hoverVy(p), v.z * 0.6);
             mc.options.forwardKey.setPressed(false);
             mc.options.sprintKey.setPressed(false);
             keysHeld = true;
@@ -779,47 +860,41 @@ public class FarmBot {
             forwardTicks = 0;
         }
 
-        // rumo: fora da área volta ao centro; chegando na borda escolhe outro; senão reavalia de tempos em tempos
+        // rumo: fora da área volta ao centro; chegando na borda escolhe outro (começando a virar cedo
+        // o bastante para o arco caber); senão reavalia de tempos em tempos
         if (!insideArea(px, pz, 0)) {
             double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
             double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
             heading = yawOf(cx - px, cz - pz);
             headingTicks = 30;
-        } else if (freeDist(px, pz, heading, EDGE_MARGIN) < mineTrigger()) {
-            newMineHeading(mc, p, 1);
-        } else if (--headingTicks <= 0) {
-            newMineHeading(mc, p, 0);
+            mineSlow = Math.max(0.25, mineSlow * 0.85);
+        } else {
+            // o rumo atual ainda é seguro? (arco simulado cabe na área e sobra espaço depois da curva)
+            double sp = simSpeed(p);
+            double[] o = arcOutcome(p, heading, sp);
+            if (o[0] < 0.2 || o[1] < turnNeed(sp)) {
+                newMineHeading(mc, p, 1);
+            } else {
+                mineSlow = Math.min(1.0, mineSlow + 0.02);
+                if (--headingTicks <= 0) newMineHeading(mc, p, 0);
+            }
         }
 
-        // voa para a frente, em sprint, só quando a câmera já está virada para o rumo
-        float yawErr = Math.abs(MathHelper.wrapDegrees(heading - p.getYaw()));
-        boolean forward = !holdForBreak && yawErr < 60f;
-        if (forward && freeDist(px, pz, p.getYaw(), 0.2) < 0.8 && insideArea(px, pz, 0.2)) {
-            forward = false;   // a câmera ainda aponta para a borda: termina de virar antes de voar
-        }
-        boolean sprint = forward && yawErr < 35f;
-
-        // altitude + freio: sem W (virando) ou logo depois de virar na borda, corta a velocidade horizontal
-        if (brakeTicks > 0) brakeTicks--;
-        applyFlightVelocity(p, (!forward || brakeTicks > 0) ? 0.6 : 1.0);
-
-        mc.options.forwardKey.setPressed(forward);
+        // W + sprint SEMPRE pressionados: voo contínuo, nunca solta para virar nem para quebrar
+        mc.options.forwardKey.setPressed(true);
         mc.options.jumpKey.setPressed(false);
-        mc.options.sprintKey.setPressed(sprint);
+        mc.options.sprintKey.setPressed(true);
         keysHeld = true;
-        if (forward) forwardTicks++;
-
-        if (sprint) {
-            if (!p.isSprinting() && !p.horizontalCollision) p.setSprinting(true);
-        } else if (p.isSprinting()) {
-            p.setSprinting(false);
-        }
+        forwardTicks++;
+        if (!p.isSprinting() && !p.horizontalCollision) p.setSprinting(true);
 
         // câmera: segue o rumo, olhando para baixo, com um leve balanço
-        if (holdForBreak) { HumanLook.coast(p); return; }   // quebrando algo demorado: mira parada
         float ty = heading + (float) (Math.sin(tickCounter * 0.13) * 5.0);
         float tp = MINE_PITCH + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 4.0);
         HumanLook.step(p, ty, tp, true);
+
+        // a velocidade gira junto com a câmera (sem deslizar de lado) e mantém a altura
+        steerFlight(p);
     }
 
     /** Quebra o bloco que está sob a mira (como quem segura o botão de ataque), todo tick. */
@@ -842,7 +917,7 @@ public class FarmBot {
             int n = breakCount.merge(pos, 1, Integer::sum);
             if (n >= 4) badTargets.add(pos);
         } else {
-            breakingSlow = true;   // bloco lento: para de voar até quebrar (senão o progresso zera)
+            // bloco lento: o voo NÃO para (igual ao farm); só desiste dele se ficar preso na mira por muito tempo
             if (pos.equals(slowPos)) {
                 if (++slowTicks > 40) { badTargets.add(pos); slowTicks = 0; }
             } else {
