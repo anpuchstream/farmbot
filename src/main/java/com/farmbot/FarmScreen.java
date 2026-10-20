@@ -70,10 +70,16 @@ public class FarmScreen extends Screen {
                     "Zona totalmente plana. O bot voa em sprint olhando para baixo, quebrando o bloco sob a mira, e espera a mina regenerar.",
                     Tab.ALL, Tab.EC),
             new Card("pr", "Modo PR", Items.NETHERITE_PICKAXE,
-                    "Zona plana no topo, mas muito funda e com vários minérios. O bot voa em sprint olhando para baixo e escava de cima para baixo, em fatias.",
+                    "Zona de mina funda (prisão): minérios e terracota. Ative e escolha abaixo como o bot trabalha: Em cima ou Corredor.",
                     Tab.ALL, Tab.PR),
+            new Card("prtop", "PR: Em cima", Items.ELYTRA,
+                    "O bot voa em sprint por cima da mina, olhando para baixo. Quando a camada de cima é quebrada (por encantamentos), ele desce sozinho para ficar no alcance e continuar minerando.",
+                    Tab.PR),
+            new Card("prcor", "PR: Corredor", Items.BEDROCK,
+                    "O bot fica no espaço entre a bedrock e a mina: LIGUE-O ali, de frente para a mina. Ele sobe e desce em diagonais, para a direita e para a esquerda, minerando a parede, de forma humanizada.",
+                    Tab.PR),
             new Card("ores", "Só minérios", Items.DIAMOND,
-                    "Ativado: quebra apenas minérios expostos. Desativado: quebra tudo (esvazia a zona). Vale para a zona da aba atual.",
+                    "Ativado: quebra apenas minérios expostos. Desativado: quebra tudo (esvazia a zona). Vale para a zona da aba atual. No modo PR também quebra terracota.",
                     Tab.ALL, Tab.EC, Tab.PR),
             new Card("speed", "Vel. de voo", Items.FIREWORK_ROCKET,
                     "Velocidade do voo na mineração (multiplica o voo normal, com sprint). Clique para alternar 1.0X a 3.0X. Mais rápido = mais blocos pulados e mais risco de o servidor reclamar.",
@@ -82,7 +88,7 @@ public class FarmScreen extends Screen {
                     "Só vale para o Farm: ativado voa, desativado corre. A mineração (EC e PR) sempre voa e precisa da permissão de voo.",
                     Tab.ALL, Tab.FARM, Tab.SYSTEM),
             new Card("area", "Área", Items.COMPASS,
-                    "Dois cantos (X Y Z) que delimitam o trabalho. No EC cubra o plano; no PR cubra o poço do topo ao fundo.",
+                    "Dois cantos (X Y Z) que delimitam o trabalho. No EC cubra o plano; no PR cubra a mina do topo ao fundo (no Corredor, a mina inteira ao longo da parede).",
                     Tab.ALL, Tab.FARM, Tab.EC, Tab.PR, Tab.SYSTEM),
             new Card("guard", "Proteção", Items.SHIELD,
                     "Para o bot e avisa se o servidor reiniciar, se você for teleportado, se sair da área, se a ferramenta (machado/enxada/picareta) for trocada ou se você receber um mapa de CAPTCHA.",
@@ -259,12 +265,29 @@ public class FarmScreen extends Screen {
         return FarmConfig.mineZone;
     }
 
+    /** Título do card (o de minérios vira "Minérios + terracota" na aba do modo PR). */
+    private static String titleOf(Card k) {
+        if (k.id.equals("ores") && zoneCtx() == FarmConfig.MineZone.PR) return "Minérios + terracota";
+        return k.title;
+    }
+
+    private static String descOf(Card k) {
+        if (k.id.equals("ores") && zoneCtx() == FarmConfig.MineZone.PR) {
+            return "Ativado: quebra apenas minérios e terracotas expostos. Desativado: quebra tudo (esvazia a zona).";
+        }
+        return k.desc;
+    }
+
     private static boolean isOn(String id) {
         switch (id) {
             case "farm": return FarmConfig.task == FarmConfig.Task.FARM;
             case "replant": return FarmConfig.replant;
             case "ec": return FarmConfig.task == FarmConfig.Task.MINE && FarmConfig.mineZone == FarmConfig.MineZone.EC;
             case "pr": return FarmConfig.task == FarmConfig.Task.MINE && FarmConfig.mineZone == FarmConfig.MineZone.PR;
+            case "prtop": return FarmConfig.task == FarmConfig.Task.MINE && FarmConfig.mineZone == FarmConfig.MineZone.PR
+                    && FarmConfig.prMode == FarmConfig.PrMode.TOP;
+            case "prcor": return FarmConfig.task == FarmConfig.Task.MINE && FarmConfig.mineZone == FarmConfig.MineZone.PR
+                    && FarmConfig.prMode == FarmConfig.PrMode.CORRIDOR;
             case "ores": return zoneCtx() == FarmConfig.MineZone.PR ? FarmConfig.oresOnlyPR : FarmConfig.oresOnlyEC;
             case "move": return FarmConfig.mode == FarmConfig.Mode.FLY;
             case "area": return FarmConfig.areaSet;
@@ -302,6 +325,16 @@ public class FarmScreen extends Screen {
             case "pr":
                 FarmConfig.task = FarmConfig.Task.MINE;
                 FarmConfig.mineZone = FarmConfig.MineZone.PR;
+                break;
+            case "prtop":
+                FarmConfig.task = FarmConfig.Task.MINE;
+                FarmConfig.mineZone = FarmConfig.MineZone.PR;
+                FarmConfig.prMode = FarmConfig.PrMode.TOP;
+                break;
+            case "prcor":
+                FarmConfig.task = FarmConfig.Task.MINE;
+                FarmConfig.mineZone = FarmConfig.MineZone.PR;
+                FarmConfig.prMode = FarmConfig.PrMode.CORRIDOR;
                 break;
             case "ores":
                 if (zoneCtx() == FarmConfig.MineZone.PR) FarmConfig.oresOnlyPR = !FarmConfig.oresOnlyPR;
@@ -360,7 +393,7 @@ public class FarmScreen extends Screen {
         List<Card> l = new ArrayList<>();
         for (Card k : CARDS) {
             if (!k.inTab(tab)) continue;
-            if (!q.isEmpty() && !k.title.toLowerCase().contains(q)) continue;
+            if (!q.isEmpty() && !titleOf(k).toLowerCase().contains(q)) continue;
             l.add(k);
         }
         return l;
@@ -542,12 +575,12 @@ public class FarmScreen extends Screen {
 
         rrBorder(c, x, y, w, h, hov ? 0xFF5B6AA0 : C_CARD_BORDER, hov ? C_CARD_HOVER : C_CARD);
         if (hov) {
-            hoverTitle = k.title;
-            hoverDesc = k.desc;
+            hoverTitle = titleOf(k);
+            hoverDesc = descOf(k);
         }
 
         drawIcon(c, k.icon, x + w / 2 - 12, y + 6, 1.5f);
-        ctext(c, k.title, x + w / 2, y + 33, on ? C_TEXT : C_MUTED);
+        ctext(c, titleOf(k), x + w / 2, y + 33, on ? C_TEXT : C_MUTED);
 
         // linha OPÇÕES
         int ox = x + 3, oy = y + 44, ow = w - 6, oh = 13;
@@ -824,6 +857,9 @@ public class FarmScreen extends Screen {
         }
         boolean farm = FarmConfig.task == FarmConfig.Task.FARM;
         String s = farm ? "Farm" : "Modo " + FarmConfig.mineZone;
+        if (!farm && FarmConfig.mineZone == FarmConfig.MineZone.PR) {
+            s += FarmConfig.prMode == FarmConfig.PrMode.TOP ? " (em cima)" : " (corredor)";
+        }
         s += "  |  Volume: " + FarmConfig.volume();
         if (farm) s += "  |  Plantas: " + FarmConfig.crops.size();
         if (FarmConfig.enabled) {

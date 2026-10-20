@@ -22,11 +22,18 @@ public class FarmConfig {
      * PR = plana no topo, mas muito funda e com vários minérios (escava de cima para baixo, em fatias).
      */
     public enum MineZone { EC, PR }
+    /**
+     * Como o bot trabalha no modo PR.
+     * TOP = voa por cima da mina e vai descendo conforme as camadas de cima são quebradas.
+     * CORRIDOR = fica no espaço entre a bedrock e a mina, subindo e descendo em diagonais, minerando a parede.
+     */
+    public enum PrMode { TOP, CORRIDOR }
 
     public static boolean enabled = false;
     public static Task task = Task.FARM;
     public static Mode mode = Mode.WALK;
     public static MineZone mineZone = MineZone.EC;
+    public static PrMode prMode = PrMode.TOP;
     /** true = quebra só minérios expostos; false = quebra tudo (esvazia a zona). Um valor por zona. */
     public static boolean oresOnlyEC = false;
     public static boolean oresOnlyPR = false;
@@ -68,7 +75,7 @@ public class FarmConfig {
 
     private static class Data {
         int[] p1, p2;
-        String mode, task, mineZone;
+        String mode, task, mineZone, prMode;
         boolean replant, areaSet;
         // Boolean (objeto) para distinguir "ausente" de "false" em configs antigas
         Boolean oresOnlyEC, oresOnlyPR, guardEnabled, alertSound, recorderLoop;
@@ -88,6 +95,7 @@ public class FarmConfig {
             d.mode = mode.name();
             d.task = task.name();
             d.mineZone = mineZone.name();
+            d.prMode = prMode.name();
             d.oresOnlyEC = oresOnlyEC;
             d.oresOnlyPR = oresOnlyPR;
             d.guardEnabled = guardEnabled;
@@ -116,6 +124,9 @@ public class FarmConfig {
             if (d.task != null) task = Task.valueOf(d.task);
             if (d.mineZone != null) {
                 try { mineZone = MineZone.valueOf(d.mineZone); } catch (IllegalArgumentException ignored) { }
+            }
+            if (d.prMode != null) {
+                try { prMode = PrMode.valueOf(d.prMode); } catch (IllegalArgumentException ignored) { }
             }
             if (d.oresOnlyEC != null) oresOnlyEC = d.oresOnlyEC;
             if (d.oresOnlyPR != null) oresOnlyPR = d.oresOnlyPR;
