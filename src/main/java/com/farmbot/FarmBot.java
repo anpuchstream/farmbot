@@ -288,6 +288,28 @@ public class FarmBot {
                 && v.y >= FarmConfig.minY() - SLACK_Y && v.y <= FarmConfig.maxY() + 1 + SLACK_Y;
     }
 
+    /**
+     * PR: o servidor resetou a mina e teleportou o personagem para o topo dela (dentro da área marcada).
+     * Descarta o estado antigo (alvos, superfície, velocidades) para o bot recomeçar dali.
+     */
+    private static void prResetResync(MinecraftClient mc, ClientPlayerEntity p) {
+        mineCandidates.clear();
+        mineCount = 0;
+        badTargets.clear();
+        breakCount.clear();
+        scanTimer = 0;
+        mineEmptyTicks = 0;
+        mineTopY = Integer.MIN_VALUE;
+        surfaceY = Integer.MIN_VALUE;
+        surfaceTimer = 0;
+        slowPos = null;
+        slowTicks = 0;
+        cmdVel = Vec3d.ZERO;
+        corVel = Vec3d.ZERO;
+        HumanLook.reset();
+        msg(mc, "§eMina resetada: você foi levado para o topo da mina. O bot continua.");
+    }
+
     /** @return true se pode continuar; false se o bot foi parado. */
     private static boolean safetyGuard(MinecraftClient mc, ClientPlayerEntity p) {
         // 1) Servidor reiniciou / troca de servidor via proxy / respawn / mudou de dimensão:
@@ -301,8 +323,14 @@ public class FarmBot {
 
         // 2) Teleporte: salto grande de posição entre dois ticks.
         if (guardPos != null && pos.squaredDistanceTo(guardPos) > TELEPORT_DIST * TELEPORT_DIST) {
-            guardStop(mc, "§cFarm Bot parado: você foi teleportado.");
-            return false;
+            if (FarmConfig.task == FarmConfig.Task.MINE && prTop() && nearArea(pos)) {
+                // PR "em cima": a mina resetou e o servidor levou o personagem para o topo da mina (dentro da área).
+                // Não é motivo de alerta: o bot só se reajusta e continua. (O corredor fica fora da mina e não é teleportado.)
+                prResetResync(mc, p);
+            } else {
+                guardStop(mc, "§cFarm Bot parado: você foi teleportado.");
+                return false;
+            }
         }
         guardPos = pos;
 
@@ -1332,6 +1360,7 @@ public class FarmBot {
         HumanLook.stepLocked(p, yawOf(corNX, corNZ), COR_PITCH);
 
         final double s = corSpeed();
+
         if (corTurnTicks > 0) corTurnTicks--;
 
         // ---- vertical: desce até a última camada, inverte e sobe (e vice-versa)

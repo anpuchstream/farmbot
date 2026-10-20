@@ -94,7 +94,7 @@ public class FarmScreen extends Screen {
                     "Dois cantos (X Y Z) que delimitam o trabalho. No EC cubra o plano; no PR cubra a mina do topo ao fundo (no Corredor, a mina inteira ao longo da parede).",
                     Tab.ALL, Tab.FARM, Tab.EC, Tab.PR, Tab.SYSTEM),
             new Card("guard", "Proteção", Items.SHIELD,
-                    "Para o bot e avisa se o servidor reiniciar, se você for teleportado, se sair da área, se a ferramenta (machado/enxada/picareta) for trocada ou se você receber um mapa de CAPTCHA.",
+                    "Para o bot e avisa se o servidor reiniciar, se você for teleportado (no PR em cima, o teleporte para dentro da área, como o reset da mina, não dispara alerta), se sair da área, se a ferramenta (machado/enxada/picareta) for trocada ou se você receber um mapa de CAPTCHA.",
                     Tab.ALL, Tab.SYSTEM),
             new Card("recorder", "Recorder", Items.CLOCK,
                     "Grava tudo o que você faz (andar, olhar, quebrar, usar itens) e repete quando você apertar a tecla de replay. Clique em OPÇÕES para escolher as teclas.",
