@@ -6,6 +6,8 @@ import net.minecraft.block.FallingBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.sound.PositionedSoundInstance;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.util.Identifier;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -134,6 +136,7 @@ public class FarmBot {
         mineSlow = 1.0;
         HumanLook.reset();
         armGuard(mc);
+        stopAlarm(mc);
         FarmConfig.enabled = true;
         msg(mc, mining ? "§aMineração " + FarmConfig.mineZone + " LIGADA" : "§aFarm LIGADO");
     }
@@ -163,10 +166,10 @@ public class FarmBot {
     private static Vec3d guardPos;
     private static boolean guardWasInside;
 
-    // --- alerta sonoro ---
-    private static final int ALERT_REPEATS = 5;     // quantos toques
-    private static final int ALERT_INTERVAL = 8;    // ticks entre os toques (~0,4 s)
-    private static int alertLeft, alertDelay;
+    // --- alerta sonoro (assets/farmbot/sounds/alarm.ogg, ~30 s) ---
+    private static final SoundEvent ALARM = SoundEvent.of(Identifier.of("farmbot", "alarm"));
+    private static boolean alertPending;
+    private static PositionedSoundInstance alarmInstance;
 
     /** Para o bot por um motivo da proteção e dispara o som de alerta. */
     private static void guardStop(MinecraftClient mc, String message) {
@@ -176,30 +179,32 @@ public class FarmBot {
 
     private static void alert() {
         if (!FarmConfig.alertSound) return;
-        alertLeft = ALERT_REPEATS;
-        alertDelay = 0;
+        alertPending = true;
     }
 
-    /** Botão de teste do menu: toca o alerta completo (ignora a opção ligado/desligado). */
+    /** Botão de teste do menu: toca o alarme (ignora a opção ligado/desligado). */
     public static void testAlert(MinecraftClient mc) {
-        alertLeft = ALERT_REPEATS;
-        alertDelay = 0;
-        tickAlert(mc);   // o primeiro toque sai na hora, sem esperar o próximo tick
+        alertPending = true;
+        tickAlert(mc);   // sai na hora, sem esperar o próximo tick
     }
 
-    /** Um toque: sino + nota alta, sem posição (relativo ao jogador), volume cheio. */
-    private static void playAlertTone(MinecraftClient mc) {
-        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_BELL_USE, 1.0f, 1.0f));
-        mc.getSoundManager().play(PositionedSoundInstance.master(SoundEvents.BLOCK_NOTE_BLOCK_PLING.value(), 1.5f, 1.0f));
+    /** Para o alarme se estiver tocando (chamado ao ligar o bot). */
+    public static void stopAlarm(MinecraftClient mc) {
+        alertPending = false;
+        if (alarmInstance != null) {
+            mc.getSoundManager().stop(alarmInstance);
+            alarmInstance = null;
+        }
     }
 
-    /** Toca os toques pendentes do alerta. Roda todo tick, mesmo com o bot desligado ou em menus. */
+    /** Dispara o alarme pendente. Roda todo tick, mesmo com o bot desligado ou em menus. */
     private static void tickAlert(MinecraftClient mc) {
-        if (alertLeft <= 0) return;
-        if (alertDelay > 0) { alertDelay--; return; }
-        playAlertTone(mc);
-        alertLeft--;
-        alertDelay = ALERT_INTERVAL;
+        if (!alertPending) return;
+        alertPending = false;
+        // não reinicia se já estiver tocando
+        if (alarmInstance != null && mc.getSoundManager().isPlaying(alarmInstance)) return;
+        alarmInstance = PositionedSoundInstance.master(ALARM, 1.0f, 1.0f);
+        mc.getSoundManager().play(alarmInstance);
     }
 
     // ------------------------------------------------------------------

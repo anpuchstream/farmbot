@@ -84,7 +84,7 @@ public class FarmScreen extends Screen {
                     "Para o bot e avisa se o servidor reiniciar, se você for teleportado, se sair da área, se a ferramenta (machado/enxada/picareta) for trocada ou se você receber um mapa de CAPTCHA.",
                     Tab.ALL, Tab.SYSTEM),
             new Card("sound", "Alerta sonoro", Items.BELL,
-                    "Toca um sino 5 vezes quando a proteção para o bot. Clique em OPÇÕES para testar o som.",
+                    "Toca o alarme (30 s) quando a proteção para o bot. Clique em OPÇÕES para testar o som.",
                     Tab.ALL, Tab.SYSTEM));
 
     private static final Map<Crop, ItemStack> CROP_ICONS = new EnumMap<>(Crop.class);
@@ -419,7 +419,7 @@ public class FarmScreen extends Screen {
 
         super.render(ctx, mx, my, delta);   // campos de texto por cima do painel
         if (System.currentTimeMillis() < soundTestUntil) {
-            ctext(ctx, "♪ Tocando o alerta sonoro... (sem ouvir? veja o volume Principal/Master do jogo)", width / 2, py + ph + 6, 0xFFFFD866);
+            ctext(ctx, "♪ Tocando o alarme... (sem ouvir? veja o volume Principal/Master do jogo)", width / 2, py + ph + 6, 0xFFFFD866);
         }
         if (hoverDesc != null) drawTip(ctx, mx, my, hoverTitle, hoverDesc);
     }

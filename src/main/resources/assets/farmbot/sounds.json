@@ -1,0 +1,7 @@
+{
+  "alarm": {
+    "sounds": [
+      { "name": "farmbot:alarm", "stream": true }
+    ]
+  }
+}
