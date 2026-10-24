@@ -517,6 +517,7 @@ public class FarmBot {
 
         // 2) colher o bloco sob a mira
         if (!inFarmArea(pos)) return;
+        if (ffLastTick == tickCounter && ffCropY != Integer.MIN_VALUE && Math.abs(pos.getY() - ffCropY) > 1) return;   // voo otimizado: ignora enfeites altos
         Crop crop = matchCrop(mc, pos);
         if (crop == null) return;
 
@@ -1737,13 +1738,15 @@ public class FarmBot {
     //   quebra a cada tick, sem perseguir plantas), só que voando baixo logo acima das plantas.
     // ==================================================================
 
-    /** Velocidade de cruzeiro do voo no farm (blocos/tick; 0.70 = 14 blocos/s). Era 0.40 (8 blocos/s). */
-    private static final double FARM_FLY_SPEED = 0.70;
+    /** Velocidade de cruzeiro do voo no farm (blocos/tick; 0.85 = 17 blocos/s). Era 0.40 (8 blocos/s). */
+    private static final double FARM_FLY_SPEED = 0.85;
     /** Rampa de aceleração e de frenagem (blocos/tick a cada tick): sem arrancada nem freada seca. */
-    private static final double FARM_FLY_ACCEL = 0.045;
-    private static final double FARM_FLY_DECEL = 0.10;
+    private static final double FARM_FLY_ACCEL = 0.05;
+    private static final double FARM_FLY_DECEL = 0.11;
     /** Frenagem usada para parar antes da borda da área (limita a velocidade pela distância livre à frente). */
-    private static final double FARM_FLY_BRAKE = 0.07;
+    private static final double FARM_FLY_BRAKE = 0.08;
+    /** Parada rápida quando está quebrando algo demorado (melancia, abóbora): a mira não sai do bloco. */
+    private static final double FARM_FLY_HOLD_DECEL = 0.30;
     /** Altura dos pés acima do topo das plantas (1.0 = pés na altura do topo; aumente para voar mais alto). */
     private static final double FARM_FLY_CLEARANCE = 1.0;
 
@@ -1752,6 +1755,10 @@ public class FarmBot {
 
     /** Altura de voo: logo acima da planta mais alta que o bot conhece (ou do topo da área, se não há nenhuma). */
     private static void updateFarmHoverY() {
+        if (ffCropY != Integer.MIN_VALUE) {          // nível das plantas medido no escaneamento da área
+            farmHoverY = ffCropY + FARM_FLY_CLEARANCE;
+            return;
+        }
         int top = Integer.MIN_VALUE;
         for (BlockPos b : ready) if (b.getY() > top) top = b.getY();
         for (BlockPos b : replantQueue.keySet()) if (b.getY() > top) top = b.getY();
@@ -1759,7 +1766,8 @@ public class FarmBot {
         farmHoverY = top + FARM_FLY_CLEARANCE;
     }
 
-    private static void runFarmFly(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
+    /** Voo antigo (rumo aleatório): reserva automática quando não dá para montar uma rota. */
+    private static void runFarmFlyLegacy(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
         if (!p.getAbilities().flying) {
             p.getAbilities().flying = true;
             p.sendAbilitiesUpdate();
@@ -1820,6 +1828,318 @@ public class FarmBot {
         float yaw = p.getYaw();
         double vy = MathHelper.clamp((farmHoverY - p.getY()) * 0.25, -0.3, 0.3);
         p.setVelocity(dirX(yaw) * farmFlySpeed, vy, dirZ(yaw) * farmFlySpeed);
+    }
+
+
+    // ==================================================================
+    //   VOO NO FARM OTIMIZADO: escaneia a área, monta uma rota em faixas (serpentina sorteada a cada volta),
+    //   contorna estruturas no meio do campo e mira nas plantas prontas ao alcance.
+    // ==================================================================
+
+    /** Distância ao ponto da rota em que o bot considera que chegou. */
+    private static final double FARM_FLY_ARRIVE = 0.9;
+    /** Giro máximo do rumo de VOO (graus/tick). A câmera é independente e gira no ritmo humano. */
+    private static final float FARM_FLY_TURN = 14f;
+    /** Alcance (olhos até a planta) usado para escolher alvos; menor que o alcance real (4.5). */
+    private static final double FARM_AIM_REACH = 4.1;
+
+    private static FarmRoute ffGrid;
+    private static int ffGridSig, ffGridTick = -100000;
+    private static int ffCropY = Integer.MIN_VALUE;          // nível (Y) das plantas, medido no escaneamento
+    private static List<double[]> ffRoute;
+    private static int ffIdx, ffPlanTick, ffLastTick = -10, ffRetryTick;
+    private static float ffYaw;                              // rumo de voo (independe da câmera)
+    private static int ffStuckTimer, ffStuckForward, ffStuckCount, ffLegacyUntil;
+    private static Vec3d ffStuckPos;
+    private static BlockPos ffAim;
+    private static int ffAimTicks;
+    private static float ffAimYaw, ffAimPitch;
+    private static final Map<BlockPos, Integer> ffIgnore = new HashMap<>();
+    private static final List<int[]> ffExtra = new ArrayList<>();   // {x, z, expira}: obstáculos achados voando
+
+    private static void runFarmFly(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
+        final double px = p.getX(), pz = p.getZ();
+        final boolean resumed = ffLastTick != tickCounter - 1;
+
+        // fora da área, rota impossível ou preso várias vezes: voo antigo (rumo aleatório)
+        if (tickCounter < ffLegacyUntil || !insideArea(px, pz, 0) || !ffEnsureRoute(mc, p, resumed)) {
+            ffLastTick = -10;
+            runFarmFlyLegacy(mc, p, holdForBreak);
+            return;
+        }
+
+        if (!p.getAbilities().flying) {
+            p.getAbilities().flying = true;
+            p.sendAbilitiesUpdate();
+        }
+        releaseKeys(mc);                                  // o voo é por velocidade: nenhuma tecla fica presa
+        if (p.isSprinting()) p.setSprinting(false);
+        if (tickCounter % 5 == 0 || Double.isNaN(farmHoverY)) updateFarmHoverY();
+
+        // ---- avança nos pontos da rota
+        double[] wp = ffRoute.get(ffIdx);
+        double dx = wp[0] - px, dz = wp[1] - pz;
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        boolean ended = false;
+        while (dist < FARM_FLY_ARRIVE) {
+            ffIdx++;
+            if (ffIdx >= ffRoute.size()) { ended = true; break; }
+            if (tickCounter - ffPlanTick > 1800) { ended = true; break; }   // replaneja (as plantas amadurecem)
+            wp = ffRoute.get(ffIdx);
+            dx = wp[0] - px;
+            dz = wp[1] - pz;
+            dist = Math.sqrt(dx * dx + dz * dz);
+        }
+        if (ended) {
+            ffRoute = null;                                // replaneja no próximo tick; este tick segue reto
+            wp = new double[]{px + dirX(ffYaw) * 6.0, pz + dirZ(ffYaw) * 6.0};
+            dx = wp[0] - px;
+            dz = wp[1] - pz;
+            dist = 6.0;
+        }
+        final float bearing = dist < 1.0e-6 ? ffYaw : yawOf(dx, dz);
+        if (resumed) ffYaw = bearing;
+
+        // ---- velocidade: cruzeiro nas retas; reduz antes de curvas fechadas (retorno de faixa)
+        double cornerV = FARM_FLY_SPEED * 0.2;
+        if (!ended && ffRoute != null && ffIdx + 1 < ffRoute.size()) {
+            double[] nx = ffRoute.get(ffIdx + 1);
+            float out = yawOf(nx[0] - wp[0], nx[1] - wp[1]);
+            float theta = Math.abs(MathHelper.wrapDegrees(out - bearing));
+            cornerV = FARM_FLY_SPEED * MathHelper.clamp(1.0 - theta / 110.0, 0.2, 1.0);
+        }
+        if (ended) cornerV = FARM_FLY_SPEED;
+        double want = Math.min(FARM_FLY_SPEED,
+                Math.sqrt(cornerV * cornerV + 2 * FARM_FLY_BRAKE * Math.max(0.0, dist - FARM_FLY_ARRIVE)));
+        if (holdForBreak) farmFlySpeed = Math.max(0.0, farmFlySpeed - FARM_FLY_HOLD_DECEL);
+        else if (want < farmFlySpeed) farmFlySpeed = Math.max(want, farmFlySpeed - FARM_FLY_DECEL);
+        else farmFlySpeed = Math.min(want, farmFlySpeed + FARM_FLY_ACCEL);
+
+        // ---- rumo de voo: acompanha o ponto da rota com giro limitado (curvas em arco)
+        float yerr = MathHelper.wrapDegrees(bearing - ffYaw);
+        ffYaw = MathHelper.wrapDegrees(ffYaw + (float) MathHelper.clamp(yerr, -FARM_FLY_TURN, FARM_FLY_TURN));
+        heading = ffYaw;
+
+        // ---- preso em algo (quis avançar e quase não saiu do lugar): marca o obstáculo e replaneja
+        if (farmFlySpeed > 0.3) ffStuckForward++;
+        if (++ffStuckTimer >= 20) {
+            ffStuckTimer = 0;
+            if (ffStuckPos != null && ffStuckForward >= 14 && ffStuckPos.squaredDistanceTo(p.getPos()) < 0.25) {
+                ffOnStuck(p);
+            } else if (ffStuckPos != null && ffStuckPos.squaredDistanceTo(p.getPos()) > 4.0) {
+                ffStuckCount = 0;
+            }
+            ffStuckPos = p.getPos();
+            ffStuckForward = 0;
+        }
+
+        // ---- câmera: mira nas plantas prontas ao alcance; sem alvo, varre o chão à frente
+        ffAimUpdate(p, holdForBreak);
+        if (holdForBreak) {
+            HumanLook.coast(p);                           // quebrando algo demorado: mira parada
+        } else if (ffAim != null) {
+            HumanLook.stepFarm(p, ffAimYaw, ffAimPitch, true);
+        } else {
+            float ty = ffYaw + (float) (Math.sin(tickCounter * 0.13) * 12.0);
+            float tp = 36f + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 8.0);
+            HumanLook.stepFarm(p, ty, tp, true);
+        }
+
+        // ---- a velocidade segue a ROTA (não a câmera) e mantém a altura
+        double vy = MathHelper.clamp((farmHoverY - p.getY()) * 0.25, -0.3, 0.3);
+        p.setVelocity(dirX(ffYaw) * farmFlySpeed, vy, dirZ(ffYaw) * farmFlySpeed);
+        ffLastTick = tickCounter;
+    }
+
+    /** Garante grade e rota válidas. false = não deu (usa o voo antigo). */
+    private static boolean ffEnsureRoute(MinecraftClient mc, ClientPlayerEntity p, boolean resumed) {
+        if (tickCounter < ffRetryTick) return false;
+        int sig = java.util.Objects.hash(FarmConfig.minX(), FarmConfig.maxX(), FarmConfig.minY(), FarmConfig.maxY(),
+                FarmConfig.minZ(), FarmConfig.maxZ(), FarmConfig.crops.hashCode());
+        boolean needGrid = ffGrid == null || sig != ffGridSig || tickCounter - ffGridTick > 3000;
+        if (needGrid) {
+            ffGrid = ffBuildGrid(mc);
+            ffGridSig = sig;
+            ffGridTick = tickCounter;
+            ffRoute = null;
+            if (ffGrid == null) {
+                ffCropY = Integer.MIN_VALUE;
+                ffRetryTick = tickCounter + 200;
+                return false;
+            }
+            msg(mc, "§bFarm voando: área escaneada (" + ffGrid.w + "x" + ffGrid.h + ", "
+                    + ffGrid.blockedCount() + " células com obstáculo"
+                    + (ffCropY == Integer.MIN_VALUE ? "" : ", plantas em Y=" + ffCropY) + ").");
+        }
+        if (ffRoute == null || ffIdx >= ffRoute.size() || resumed) {
+            if (!ffPlan(p)) {
+                ffRetryTick = tickCounter + 100;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Escaneia a área: acha o nível das plantas e marca as colunas com bloco sólido na altura do voo. */
+    private static FarmRoute ffBuildGrid(MinecraftClient mc) {
+        final int x0 = FarmConfig.minX(), z0 = FarmConfig.minZ();
+        final int w = FarmConfig.maxX() - x0 + 1, h = FarmConfig.maxZ() - z0 + 1;
+        if (w < 6 || h < 6 || (long) w * h > 250000L) return null;
+        final int yLo = FarmConfig.minY() - V_TOL, yHi = FarmConfig.maxY() + V_TOL;
+
+        // 1) nível das plantas: o mais ALTO que tenha pelo menos 30% do nível mais cheio
+        //    (enfeites com poucas plantas, como uma estátua de abóboras, ficam de fora)
+        int[] hist = new int[yHi - yLo + 1];
+        BlockPos.Mutable m = new BlockPos.Mutable();
+        for (int x = x0; x < x0 + w; x++)
+            for (int z = z0; z < z0 + h; z++)
+                for (int y = yLo; y <= yHi; y++) {
+                    BlockState s = mc.world.getBlockState(m.set(x, y, z));
+                    if (s.isAir()) continue;
+                    for (Crop c : FarmConfig.crops) {
+                        if (c.matches(s)) { hist[y - yLo]++; break; }
+                    }
+                }
+        int max = 0;
+        for (int v : hist) max = Math.max(max, v);
+        int cropY = Integer.MIN_VALUE;
+        if (max > 0) {
+            for (int i = hist.length - 1; i >= 0; i--) {
+                if (hist[i] * 10 >= max * 3) { cropY = yLo + i; break; }
+            }
+        }
+        ffCropY = cropY;
+        final int level = cropY != Integer.MIN_VALUE ? cropY : FarmConfig.maxY();
+
+        // 2) obstáculos: colunas com bloco de colisão onde ficam os pés e a cabeça (voo = topo das plantas)
+        final int yFeet = level + 1;
+        boolean[] raw = new boolean[w * h];
+        for (int z = 0; z < h; z++)
+            for (int x = 0; x < w; x++)
+                for (int dy = 0; dy <= 1; dy++) {
+                    BlockState s = mc.world.getBlockState(m.set(x0 + x, yFeet + dy, z0 + z));
+                    if (!s.isAir() && !s.getCollisionShape(mc.world, m).isEmpty()) { raw[z * w + x] = true; break; }
+                }
+        // 3) obstáculos descobertos voando (o bot ficou preso ali)
+        for (int i = ffExtra.size() - 1; i >= 0; i--) {
+            int[] e = ffExtra.get(i);
+            if (e[2] <= tickCounter) { ffExtra.remove(i); continue; }
+            int cx = e[0] - x0, cz = e[1] - z0;
+            if (cx >= 0 && cz >= 0 && cx < w && cz < h) raw[cz * w + cx] = true;
+        }
+        return new FarmRoute(x0, z0, w, h, raw, 1);
+    }
+
+    /** Monta uma rota nova a partir da posição atual. */
+    private static boolean ffPlan(ClientPlayerEntity p) {
+        FarmRoute g = ffGrid;
+        if (g == null) return false;
+        int[] dens = new int[g.w * g.h];
+        for (BlockPos b : ready) ffCount(dens, g, b);
+        for (BlockPos b : replantQueue.keySet()) ffCount(dens, g, b);
+
+        int sp = 4 + RNG.nextInt(2);                                        // espaço entre faixas: 4 ou 5
+        boolean alongX;
+        if (g.w >= g.h * 1.3) alongX = RNG.nextInt(100) < 80;               // prefere faixas no lado maior
+        else if (g.h >= g.w * 1.3) alongX = RNG.nextInt(100) < 20;
+        else alongX = RNG.nextBoolean();
+
+        List<double[]> r = g.plan(p.getX(), p.getZ(), alongX, sp, RNG.nextInt(sp), dens, RNG);
+        if (r.isEmpty()) r = g.plan(p.getX(), p.getZ(), alongX, sp, RNG.nextInt(sp), null, RNG);   // sem pular faixas
+        if (r.isEmpty()) return false;
+        ffRoute = r;
+        ffIdx = 0;
+        ffPlanTick = tickCounter;
+        return true;
+    }
+
+    private static void ffCount(int[] dens, FarmRoute g, BlockPos b) {
+        if (ffCropY != Integer.MIN_VALUE && Math.abs(b.getY() - ffCropY) > 1) return;
+        int cx = b.getX() - g.x0, cz = b.getZ() - g.z0;
+        if (cx >= 0 && cz >= 0 && cx < g.w && cz < g.h) dens[cz * g.w + cx]++;
+    }
+
+    /** Preso: marca as células à frente como obstáculo, replaneja e, se repetir, volta ao voo antigo por um tempo. */
+    private static void ffOnStuck(ClientPlayerEntity p) {
+        double fx = dirX(ffYaw), fz = dirZ(ffYaw);
+        for (double d = 1.0; d <= 2.0; d += 0.5) {
+            ffExtra.add(new int[]{(int) Math.floor(p.getX() + fx * d), (int) Math.floor(p.getZ() + fz * d), tickCounter + 3000});
+        }
+        ffGridTick = -100000;     // refaz a grade (já com esses obstáculos) e a rota
+        ffRoute = null;
+        if (++ffStuckCount >= 4) {
+            ffLegacyUntil = tickCounter + 300;
+            ffStuckCount = 0;
+        }
+    }
+
+    /** Escolhe/mantém o alvo da mira: planta pronta (ou terra a replantar) ao alcance, com o menor giro. */
+    private static void ffAimUpdate(ClientPlayerEntity p, boolean hold) {
+        if (tickCounter % 300 == 0) ffIgnore.values().removeIf(t -> t <= tickCounter);
+        final Vec3d eye = p.getEyePos();
+        final float yaw = p.getYaw(), pitch = p.getPitch();
+
+        if (ffAim != null) {
+            boolean listed = replantQueue.containsKey(ffAim) || ready.contains(ffAim);
+            if (!hold && ++ffAimTicks > 14) {              // não está quebrando (algo no caminho?): desiste dele
+                ffIgnore.put(ffAim, tickCounter + 200);
+                ffAim = null;
+            } else if (!listed || Double.isNaN(ffAimCost(eye, yaw, pitch, ffAimPoint(ffAim)))) {
+                ffAim = null;
+            }
+        }
+        if (ffAim == null) {
+            ffAimTicks = 0;
+            double best = Double.MAX_VALUE;
+            BlockPos bestPos = null;
+            for (BlockPos b : ready) {
+                double c = ffAimScore(eye, yaw, pitch, b);
+                if (c < best) { best = c; bestPos = b; }
+            }
+            for (BlockPos b : replantQueue.keySet()) {
+                double c = ffAimScore(eye, yaw, pitch, b);
+                if (c < best) { best = c; bestPos = b; }
+            }
+            ffAim = bestPos;
+        }
+        if (ffAim != null) {
+            Vec3d pt = ffAimPoint(ffAim);
+            double dx = pt.x - eye.x, dy = pt.y - eye.y, dz = pt.z - eye.z;
+            double hd = Math.sqrt(dx * dx + dz * dz);
+            ffAimYaw = hd < 0.05 ? yaw : yawOf(dx, dz);
+            ffAimPitch = (float) Math.toDegrees(Math.atan2(-dy, hd));
+        }
+    }
+
+    private static double ffAimScore(Vec3d eye, float yaw, float pitch, BlockPos b) {
+        if (Math.abs(b.getX() + 0.5 - eye.x) > FARM_AIM_REACH || Math.abs(b.getZ() + 0.5 - eye.z) > FARM_AIM_REACH) {
+            return Double.MAX_VALUE;                                   // longe demais (descarte rápido)
+        }
+        if (ffCropY != Integer.MIN_VALUE && Math.abs(b.getY() - ffCropY) > 1) return Double.MAX_VALUE;  // enfeite/estrutura
+        Integer ig = ffIgnore.get(b);
+        if (ig != null && ig > tickCounter) return Double.MAX_VALUE;
+        double c = ffAimCost(eye, yaw, pitch, ffAimPoint(b));
+        return Double.isNaN(c) ? Double.MAX_VALUE : c;
+    }
+
+    /** Ponto de mira: o meio da planta; para replantar, o topo da terra logo abaixo. */
+    private static Vec3d ffAimPoint(BlockPos b) {
+        if (replantQueue.containsKey(b)) return new Vec3d(b.getX() + 0.5, b.getY() - 0.12, b.getZ() + 0.5);
+        return new Vec3d(b.getX() + 0.5, b.getY() + 0.4, b.getZ() + 0.5);
+    }
+
+    /** Custo (giro necessário) para mirar o ponto; NaN se estiver fora do alcance ou num ângulo ruim. */
+    private static double ffAimCost(Vec3d eye, float yaw, float pitch, Vec3d pt) {
+        double dx = pt.x - eye.x, dy = pt.y - eye.y, dz = pt.z - eye.z;
+        double hd = Math.sqrt(dx * dx + dz * dz);
+        if (Math.sqrt(hd * hd + dy * dy) > FARM_AIM_REACH) return Double.NaN;
+        float tp = (float) Math.toDegrees(Math.atan2(-dy, hd));
+        if (tp < 12f || tp > 78f) return Double.NaN;                   // quase na horizontal ou bem embaixo
+        float ty = hd < 0.05 ? yaw : yawOf(dx, dz);
+        float rel = Math.abs(MathHelper.wrapDegrees(ty - ffYaw));      // ângulo em relação ao rumo de voo
+        if (rel > 85f) return Double.NaN;                              // ficou para trás
+        float turn = Math.abs(MathHelper.wrapDegrees(ty - yaw));
+        return turn + 0.6 * Math.abs(tp - pitch) + 0.15 * rel;
     }
 
     /** Escolhe o próximo alvo à FRENTE: perto, mas penalizando quem exige uma virada grande. */
