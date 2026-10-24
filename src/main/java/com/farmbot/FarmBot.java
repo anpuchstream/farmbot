@@ -136,6 +136,7 @@ public class FarmBot {
         idleTicks = 0;
         scanTimer = 0; cooldown = 0; statusTimer = 0; warnedFly = false; warnedHunger = false;
         forwardTicks = 0; breakingSlow = false; headingTicks = 0; rightClickCooldown = 0;
+        farmFlySpeed = 0; farmHoverY = Double.NaN;
         heading = mc.player.getYaw();
         mineSlow = 1.0;
         HumanLook.reset();
@@ -410,11 +411,10 @@ public class FarmBot {
             boolean holdForBreak = breakingSlow;   // veio do tick anterior
             breakingSlow = false;
             if (wantsFly(mc, p)) {
-                releaseKeys(mc);
-                move(mc, p, false);                // voando: movimento por velocidade
-                setFarmAim(p);
-                updateLook(p);
+                cmdVel = Vec3d.ZERO;
+                runFarmFly(mc, p, holdForBreak);   // voando baixo: mesmo rumo aleatório do farm correndo
             } else {
+                farmFlySpeed = 0;
                 cmdVel = Vec3d.ZERO;
                 runFarm(mc, p, holdForBreak);      // corrida de verdade (W + sprint) + câmera
             }
@@ -1729,7 +1729,97 @@ public class FarmBot {
         if (holdForBreak) { HumanLook.coast(p); return; }   // quebrando algo demorado: mira parada
         float ty = heading + (float) (Math.sin(tickCounter * 0.13) * 12.0);
         float tp = 36f + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 8.0);
-        HumanLook.step(p, ty, tp, true);
+        HumanLook.stepFarm(p, ty, tp, true);   // perfil suave do farm (a mineração usa o rápido)
+    }
+
+    // ==================================================================
+    //   VOO NO FARM: a mesma lógica do farm correndo (rumo aleatório de 3–5 s, mira varrendo,
+    //   quebra a cada tick, sem perseguir plantas), só que voando baixo logo acima das plantas.
+    // ==================================================================
+
+    /** Velocidade de cruzeiro do voo no farm (blocos/tick; 0.40 = 8 blocos/s). */
+    private static final double FARM_FLY_SPEED = 0.40;
+    /** Rampa de aceleração e de frenagem (blocos/tick a cada tick): sem arrancada nem freada seca. */
+    private static final double FARM_FLY_ACCEL = 0.025;
+    private static final double FARM_FLY_DECEL = 0.06;
+    /** Frenagem usada para parar antes da borda da área (limita a velocidade pela distância livre à frente). */
+    private static final double FARM_FLY_BRAKE = 0.04;
+    /** Altura dos pés acima do topo das plantas (1.0 = pés na altura do topo; aumente para voar mais alto). */
+    private static final double FARM_FLY_CLEARANCE = 1.0;
+
+    private static double farmFlySpeed;
+    private static double farmHoverY = Double.NaN;
+
+    /** Altura de voo: logo acima da planta mais alta que o bot conhece (ou do topo da área, se não há nenhuma). */
+    private static void updateFarmHoverY() {
+        int top = Integer.MIN_VALUE;
+        for (BlockPos b : ready) if (b.getY() > top) top = b.getY();
+        for (BlockPos b : replantQueue.keySet()) if (b.getY() > top) top = b.getY();
+        if (top == Integer.MIN_VALUE) top = FarmConfig.maxY();
+        farmHoverY = top + FARM_FLY_CLEARANCE;
+    }
+
+    private static void runFarmFly(MinecraftClient mc, ClientPlayerEntity p, boolean holdForBreak) {
+        if (!p.getAbilities().flying) {
+            p.getAbilities().flying = true;
+            p.sendAbilitiesUpdate();
+        }
+        releaseKeys(mc);                                  // o voo é por velocidade: nenhuma tecla fica presa
+        if (p.isSprinting()) p.setSprinting(false);
+        if (tickCounter % 5 == 0 || Double.isNaN(farmHoverY)) updateFarmHoverY();
+
+        final double px = p.getX(), pz = p.getZ();
+
+        // travou em algo (quis avançar quase o tempo todo e quase não saiu do lugar): vira bastante
+        if (++stuckTimer >= 20) {
+            stuckTimer = 0;
+            if (lastCheckPos != null && forwardTicks >= 14
+                    && lastCheckPos.squaredDistanceTo(p.getPos()) < 0.25) {
+                newHeading(p, 2);
+            }
+            lastCheckPos = p.getPos();
+            forwardTicks = 0;
+        }
+
+        // rumo: fora da área volta ao centro; chegando na borda atravessa; senão troca a cada 3–5 s
+        if (!insideArea(px, pz, 0)) {
+            double cx = (FarmConfig.minX() + FarmConfig.maxX() + 1) / 2.0;
+            double cz = (FarmConfig.minZ() + FarmConfig.maxZ() + 1) / 2.0;
+            heading = yawOf(cx - px, cz - pz);
+            headingTicks = 30;
+        } else if (freeDist(px, pz, heading, EDGE_MARGIN) < wallTrigger()) {
+            newHeading(p, 1);
+        } else if (--headingTicks <= 0) {
+            newHeading(p, 0);
+        }
+
+        // velocidade desejada: cruzeiro quando a câmera está alinhada com o rumo, reduz nas viradas
+        // grandes e freia a tempo de não passar da borda
+        float yawErr = Math.abs(MathHelper.wrapDegrees(heading - p.getYaw()));
+        double want = FARM_FLY_SPEED;
+        if (holdForBreak || yawErr >= 100f) want = 0;
+        else if (yawErr >= 40f) want = FARM_FLY_SPEED * (100f - yawErr) / 60.0;
+        if (insideArea(px, pz, 0.2)) {
+            double free = freeDist(px, pz, p.getYaw(), 0.2);
+            want = Math.min(want, Math.sqrt(2 * FARM_FLY_BRAKE * Math.max(0.0, free - 0.4)));
+        }
+        if (want < farmFlySpeed) farmFlySpeed = Math.max(want, farmFlySpeed - FARM_FLY_DECEL);
+        else farmFlySpeed = Math.min(want, farmFlySpeed + FARM_FLY_ACCEL);
+        if (want > 0.1) forwardTicks++;
+
+        // câmera: igual à do farm correndo (segue o rumo e varre o chão à frente)
+        if (holdForBreak) {
+            HumanLook.coast(p);                           // quebrando algo demorado: mira parada
+        } else {
+            float ty = heading + (float) (Math.sin(tickCounter * 0.13) * 12.0);
+            float tp = 36f + (float) (Math.sin(tickCounter * 0.07 + 1.0) * 8.0);
+            HumanLook.stepFarm(p, ty, tp, true);
+        }
+
+        // a velocidade segue a câmera (curvas em arco, sem deslizar de lado) e mantém a altura
+        float yaw = p.getYaw();
+        double vy = MathHelper.clamp((farmHoverY - p.getY()) * 0.25, -0.3, 0.3);
+        p.setVelocity(dirX(yaw) * farmFlySpeed, vy, dirZ(yaw) * farmFlySpeed);
     }
 
     /** Escolhe o próximo alvo à FRENTE: perto, mas penalizando quem exige uma virada grande. */
@@ -1833,7 +1923,7 @@ public class FarmBot {
             HumanLook.coast(p);
             return;
         }
-        HumanLook.step(p, ty, tp, aiming);
+        HumanLook.stepFarm(p, ty, tp, aiming);
     }
 
     static void msg(MinecraftClient mc, String s) {

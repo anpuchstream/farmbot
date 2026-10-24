@@ -22,6 +22,13 @@ public final class HumanLook {
     /** Quão rápido a velocidade desejada cai conforme o erro diminui (frenagem suave). */
     private static final float GAIN = 0.25f;
 
+    // --- Perfil do FARM (o que foi acertado): giro lento e macio, sem viradas bruscas ---
+    // A mineração usa o perfil rápido acima; o farm usa este. Se quiser o farm mais ágil/mais suave,
+    // mexa só nestes três valores.
+    private static final float FARM_MAX_YAW_SPEED = 6.5f;   // graus/tick (~130°/s)
+    private static final float FARM_YAW_ACCEL = 1.0f;       // graus/tick²
+    private static final float FARM_GAIN = 0.14f;
+
     private static float yawVel, pitchVel;
     private static float phaseA, phaseB;
     private static long ticks;
@@ -41,15 +48,21 @@ public final class HumanLook {
      * @param aiming true quando está mirando numa planta (balanço menor, para não sair de cima dela)
      */
     public static void step(ClientPlayerEntity p, float targetYaw, float targetPitch, boolean aiming) {
-        step(p, targetYaw, targetPitch, aiming ? 0.35f : 1.0f);
+        step(p, targetYaw, targetPitch, aiming ? 0.35f : 1.0f, MAX_YAW_SPEED, YAW_ACCEL, GAIN);
+    }
+
+    /** Mesma câmera, com o perfil suave do FARM (giro lento, sem viradas bruscas). */
+    public static void stepFarm(ClientPlayerEntity p, float targetYaw, float targetPitch, boolean aiming) {
+        step(p, targetYaw, targetPitch, aiming ? 0.35f : 1.0f, FARM_MAX_YAW_SPEED, FARM_YAW_ACCEL, FARM_GAIN);
     }
 
     /** Câmera travada: mesma dinâmica de giro, mas SEM balanço (a mira fica parada até o alvo mudar). */
     public static void stepLocked(ClientPlayerEntity p, float targetYaw, float targetPitch) {
-        step(p, targetYaw, targetPitch, 0f);
+        step(p, targetYaw, targetPitch, 0f, MAX_YAW_SPEED, YAW_ACCEL, GAIN);
     }
 
-    private static void step(ClientPlayerEntity p, float targetYaw, float targetPitch, float sway) {
+    private static void step(ClientPlayerEntity p, float targetYaw, float targetPitch, float sway,
+                             float maxYawSpeed, float yawAccel, float gain) {
         ticks++;
         float swayYaw = (float) (Math.sin(ticks * 0.037 + phaseA) * 0.9
                 + Math.sin(ticks * 0.093 + phaseB) * 0.4) * sway;
@@ -58,8 +71,8 @@ public final class HumanLook {
         float dy = MathHelper.wrapDegrees(targetYaw + swayYaw - p.getYaw());
         float dp = targetPitch + swayPitch - p.getPitch();
 
-        yawVel = approach(yawVel, MathHelper.clamp(dy * GAIN, -MAX_YAW_SPEED, MAX_YAW_SPEED), YAW_ACCEL);
-        pitchVel = approach(pitchVel, MathHelper.clamp(dp * GAIN, -MAX_PITCH_SPEED, MAX_PITCH_SPEED), PITCH_ACCEL);
+        yawVel = approach(yawVel, MathHelper.clamp(dy * gain, -maxYawSpeed, maxYawSpeed), yawAccel);
+        pitchVel = approach(pitchVel, MathHelper.clamp(dp * gain, -MAX_PITCH_SPEED, MAX_PITCH_SPEED), PITCH_ACCEL);
 
         apply(p);
     }
