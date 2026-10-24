@@ -1737,13 +1737,13 @@ public class FarmBot {
     //   quebra a cada tick, sem perseguir plantas), só que voando baixo logo acima das plantas.
     // ==================================================================
 
-    /** Velocidade de cruzeiro do voo no farm (blocos/tick; 0.40 = 8 blocos/s). */
-    private static final double FARM_FLY_SPEED = 0.40;
+    /** Velocidade de cruzeiro do voo no farm (blocos/tick; 0.70 = 14 blocos/s). Era 0.40 (8 blocos/s). */
+    private static final double FARM_FLY_SPEED = 0.70;
     /** Rampa de aceleração e de frenagem (blocos/tick a cada tick): sem arrancada nem freada seca. */
-    private static final double FARM_FLY_ACCEL = 0.025;
-    private static final double FARM_FLY_DECEL = 0.06;
+    private static final double FARM_FLY_ACCEL = 0.045;
+    private static final double FARM_FLY_DECEL = 0.10;
     /** Frenagem usada para parar antes da borda da área (limita a velocidade pela distância livre à frente). */
-    private static final double FARM_FLY_BRAKE = 0.04;
+    private static final double FARM_FLY_BRAKE = 0.07;
     /** Altura dos pés acima do topo das plantas (1.0 = pés na altura do topo; aumente para voar mais alto). */
     private static final double FARM_FLY_CLEARANCE = 1.0;
 
